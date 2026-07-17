@@ -2,8 +2,17 @@
  * ============================================================
  *  CART-E : THE HUMAN-FOLLOWING SMART TROLLEY
  * ============================================================
- *  Board    : ESP32 Dev Module
- *  Made for : Innovation competition (explained for Year 6!)
+ *  Board  : NodeMCU ESP32 (30-pin) sitting on the
+ *           CYTRON ROBO ESP32 expansion board
+ *  IDE    : Arduino IDE  (select board "NodeMCU-32S" or "ESP32 Dev Module")
+ *
+ *  WHY THE ROBO ESP32 MAKES OUR LIFE EASY:
+ *    - Motor driver is BUILT IN  (no L298N board needed!)
+ *    - Buzzer is BUILT IN on D23 (flip its MUTE switch to ON!)
+ *      Your external buzzer joins in PARALLEL on the same pin.
+ *    - 2 rainbow NeoPixel LEDs BUILT IN on D15
+ *      Your external NeoPixel light joins in PARALLEL too and
+ *      always copies the same colour. Both, no extra pins!
  *
  *  HOW TO THINK ABOUT THIS ROBOT:
  *  The trolley has 6 "eyes" (ultrasonic sensors):
@@ -13,7 +22,7 @@
  *                               U6 (back) stop us hitting things
  *
  *  Every loop the trolley does 4 things, in this order:
- *    1. Is the emergency button pressed?  -> STOP EVERYTHING
+ *    1. Is the ONE button still latched ON? -> released = STOP ALL
  *    2. Where is my friend?               -> read U1, U2, U3
  *    3. What move do I want to make?      -> forward/stop/turn/back
  *    4. Do my bodyguards say it is safe?  -> read U4, U5, U6
@@ -23,6 +32,7 @@
  *    - Adafruit PN532        (for the RFID reader)
  *    - Adafruit SSD1306      (for the OLED screen)
  *    - Adafruit GFX Library  (helper for the screen)
+ *    - Adafruit NeoPixel     (for the onboard rainbow LEDs)
  *    (Adafruit BusIO installs automatically as a dependency —
  *     say YES when the Library Manager asks!)
  * ============================================================
@@ -32,45 +42,91 @@
 #include <Adafruit_PN532.h>    // The RFID reader
 #include <Adafruit_GFX.h>      // Drawing helper for the screen
 #include <Adafruit_SSD1306.h>  // The OLED screen
+#include <Adafruit_NeoPixel.h> // The onboard rainbow LEDs
 
 /* ============================================================
- *  PIN MAP  (which wire goes to which leg of the ESP32)
- *  Tip: if a pin gives you trouble, you can change the number
- *  here and re-wire — everything else in the code still works.
+ *  PIN MAP — checked against the official Cytron ROBO-ESP32
+ *  datasheet, so these numbers match the board's printing!
  * ============================================================ */
 
 // --- The 6 ultrasonic sensors (each one has TRIG and ECHO) ---
 // TRIG = the mouth (sends a click), ECHO = the ear (hears it back)
-const int TRIG_PIN[6] = {  4,  5, 13, 14, 16, 17 };
-const int ECHO_PIN[6] = { 34, 35, 36, 39, 32, 33 };
+//
+// GROVE CABLE TRICK: one Grove port has exactly 4 wires
+// (signal, signal, 3V3, GND) — a perfect match for one sensor's
+// (Trig, Echo, VCC, GND)! But look closely at the board printing:
+// neighbouring Grove ports SHARE a pin (Grove 3 & 4 both have D25!)
+// and Grove 7's pins (D36/D39) can only LISTEN, never talk.
+// So we use Grove ports 1, 3 and 5 (their pins don't overlap),
+// the servo headers for two more, and the breakout header for the last:
+//
+//   U1 front       -> GROVE 1      : trig D16, echo D17
+//   U2 front-left  -> GROVE 3      : trig D26, echo D25
+//   U3 front-right -> GROVE 5      : trig D33, echo D32
+//   U4 back-left   -> servo S pins : trig D4,  echo D18
+//   U5 back-right  -> servo S pins : trig D5,  echo D19
+//   U6 back        -> breakout     : trig D2,  echo D36 (label "VP")
+//
+// (If one sensor always reads 999, its Trig/Echo wires are swapped —
+//  either swap the two wires, or swap its two numbers below!)
+const int TRIG_PIN[6] = { 16, 26, 33,  4,  5,  2 };
+const int ECHO_PIN[6] = { 17, 25, 32, 18, 19, 36 };
 
 // Friendly names so we never mix the sensors up.
 // (These are just positions 0-5 inside the arrays above.)
-const int U1_FRONT      = 0;  // front eye  - watches the person
-const int U2_FRONT_LEFT = 1;  // turning eye - left
-const int U3_FRONT_RIGHT= 2;  // turning eye - right
-const int U4_BACK_LEFT  = 3;  // bodyguard  - back-left corner
-const int U5_BACK_RIGHT = 4;  // bodyguard  - back-right corner
-const int U6_BACK       = 5;  // bodyguard  - straight behind us
+const int U1_FRONT       = 0;  // front eye  - watches the person
+const int U2_FRONT_LEFT  = 1;  // turning eye - left
+const int U3_FRONT_RIGHT = 2;  // turning eye - right
+const int U4_BACK_LEFT   = 3;  // bodyguard  - back-left corner
+const int U5_BACK_RIGHT  = 4;  // bodyguard  - back-right corner
+const int U6_BACK        = 5;  // bodyguard  - straight behind us
 
-// --- Motors (through an L298N driver board) ---
-// M1 = LEFT wheel, M2 = RIGHT wheel
-const int M1_IN1 = 18;   // M1 spins forward when IN1=HIGH, IN2=LOW
-const int M1_IN2 = 19;
-const int M2_IN3 = 23;   // M2 spins forward when IN3=HIGH, IN4=LOW
-const int M2_IN4 = 25;
+// --- Motors: the driver is BUILT INTO the Robo ESP32! ---
+// From the Cytron datasheet's truth table:
+//   A = HIGH, B = LOW  -> motor spins FORWARD
+//   A = LOW,  B = HIGH -> motor spins BACKWARD
+//   A = LOW,  B = LOW  -> brake (stop)
+// Just wire M1 to the left wheel, M2 to the right wheel terminals.
+const int M1_A = 12;   // Motor 1 (LEFT wheel)  terminal M1A
+const int M1_B = 13;   //                        terminal M1B
+const int M2_A = 14;   // Motor 2 (RIGHT wheel) terminal M2A
+const int M2_B = 27;   //                        terminal M2B
 
-// --- Lights, buzzer and buttons ---
-const int LED_GREEN  = 26;  // green  = "I'm happily following you"
-const int LED_RED    = 27;  // red    = "I stopped! Something is wrong"
-const int LED_YELLOW = 12;  // yellow = "Please wait for me!"
-const int BUZZER     = 15;  // beeps to get attention
+// --- Buzzers: built-in AND external, singing together! ---
+// The Robo ESP32 has a piezo buzzer built in on D23 (flip its
+// MUTE switch to ON). Your EXTERNAL buzzer connects IN PARALLEL:
+// wire it to the D23 breakout pin + GND, and both buzzers get the
+// same song at the same time — like a duet, no extra pin needed.
+// (Use a small PASSIVE piezo buzzer, or a buzzer module with its
+//  own little transistor, so we don't overwork the pin.)
+const int BUZZER    = 23;
 
-const int BTN_START     = 0;   // press once to wake the trolley up
-const int BTN_EMERGENCY = 2;   // press to STOP EVERYTHING instantly
+// --- Rainbow LEDs: built-in AND external, matching colours! ---
+// The 2 onboard NeoPixels sit on D15. Your EXTERNAL NeoPixel
+// module/stick connects IN PARALLEL to the same D15 breakout pin
+// (+ 3V3 + GND). It receives the exact same colour message, so the
+// big external light always copies the small onboard ones. Magic!
+const int NEOPIXELS  = 15;
+const int NUM_PIXELS = 8;  // covers 2 onboard + an external stick of
+                           // up to 8 lights. External strip longer?
+                           // Just raise this number to match it.
 
-// (The RFID reader and OLED both share the I2C pins:
-//  SDA = GPIO21, SCL = GPIO22. Like two friends on one phone line.)
+// --- THE ONE AND ONLY BUTTON ---
+// A self-latching SPST push button (normally open):
+//   press once  -> it latches closed  -> trolley ON
+//   press again -> it springs open    -> trolley OFF (emergency stop!)
+// Because it LATCHES, we don't look for a "press" — we simply read
+// whether the switch is closed (ON) or open (OFF) right now.
+// Wire it between the D35 breakout pin and GND. D35 already has a
+// pull-up ON THE ROBO ESP32 BOARD (it belongs to onboard button 1),
+// so open = HIGH, latched = LOW.
+// Bonus: onboard button "1" is on the same pin — holding it down
+// works as a quick test of the trolley without your big button!
+const int SW_POWER = 35;  // LOW = latched ON, HIGH = released OFF
+
+// (The RFID reader and OLED both plug into I2C: SDA = D21, SCL = D22.
+//  On the Robo ESP32 that is Grove Port 2 or the Maker Port —
+//  like two friends sharing one phone line.)
 
 /* ============================================================
  *  DISTANCE RULES  (all in centimetres)
@@ -116,12 +172,17 @@ const int NUM_ITEMS = sizeof(shopItems) / sizeof(shopItems[0]);
  *  GLOBAL OBJECTS AND VARIABLES
  *  ("Global" = the whole program can see them)
  * ============================================================ */
+
 // RFID reader on I2C. The -1, -1 means "IRQ and RESET pins are
 // not wired" — the library officially supports this for I2C mode.
 Adafruit_PN532 rfid(-1, -1, &Wire);
+
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);          // 128x64 OLED screen
 
-bool  trolleyAwake   = false;  // has the start button been pressed?
+// The two onboard rainbow LEDs (NeoPixels) on pin D15
+Adafruit_NeoPixel pixels(NUM_PIXELS, NEOPIXELS, NEO_GRB + NEO_KHZ800);
+
+bool  trolleyAwake   = false;  // is the latching button switched ON?
 float totalPrice     = 0.0;    // running total of the shopping
 long  lastFrontDist  = FOLLOW_DIST; // remembers last U1 reading
                                     // (to spot "person ran away!")
@@ -138,7 +199,7 @@ const unsigned long SHOW_ITEM_MS = 20000; // 20 seconds
  * ============================================================ */
 void setup() {
   Serial.begin(115200);           // so we can print messages to the computer
-  Serial.println("Cart-E is starting up...");
+  Serial.println("Cart-E (Robo ESP32 edition) is starting up...");
 
   // Tell every pin what job it has (INPUT = ear, OUTPUT = mouth)
   for (int i = 0; i < 6; i++) {
@@ -146,18 +207,18 @@ void setup() {
     pinMode(ECHO_PIN[i], INPUT);
     digitalWrite(TRIG_PIN[i], LOW);
   }
-  pinMode(M1_IN1, OUTPUT);  pinMode(M1_IN2, OUTPUT);
-  pinMode(M2_IN3, OUTPUT);  pinMode(M2_IN4, OUTPUT);
-  pinMode(LED_GREEN, OUTPUT);
-  pinMode(LED_RED, OUTPUT);
-  pinMode(LED_YELLOW, OUTPUT);
+  pinMode(M1_A, OUTPUT);  pinMode(M1_B, OUTPUT);
+  pinMode(M2_A, OUTPUT);  pinMode(M2_B, OUTPUT);
   pinMode(BUZZER, OUTPUT);
-  // INPUT_PULLUP means: the pin reads HIGH normally,
-  // and LOW when the button is pressed. (Wire button to GND.)
-  pinMode(BTN_START, INPUT_PULLUP);
-  pinMode(BTN_EMERGENCY, INPUT_PULLUP);
+  // D35 is an "ears-only" pin and the Robo ESP32 board already
+  // gives it a pull-up resistor, so plain INPUT is all we need.
+  pinMode(SW_POWER, INPUT);          // switch wired to GND
 
   stopMotors();                   // always start standing still!
+
+  pixels.begin();                 // wake up the rainbow LEDs
+  pixels.setBrightness(60);       // not too bright — save the eyes!
+  showColor(255, 0, 0);           // red while sleeping
 
   Wire.begin(21, 22);             // start the I2C party line
 
@@ -170,7 +231,7 @@ void setup() {
   oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 0);
   oled.println("CART-E");
-  oled.println("Press START to begin");
+  oled.println("Press button to start");
   oled.display();
 
   // --- Wake up the RFID reader ---
@@ -181,8 +242,6 @@ void setup() {
     rfid.SAMConfig();             // "SAM config" = get ready to read cards
     Serial.println("RFID reader ready!");
   }
-
-  digitalWrite(LED_RED, HIGH);    // red while sleeping
 }
 
 /* ============================================================
@@ -190,22 +249,24 @@ void setup() {
  * ============================================================ */
 void loop() {
 
-  /* ---- STEP 0: Is the trolley awake yet? ---- */
+  /* ---- STEP 0 + 1: Read the ONE button (power + emergency) ----
+   * Latched closed = ON.  Released open = OFF.
+   * Turning it off while driving IS the emergency stop!            */
+  bool switchOn = switchIsOn();
+
   if (!trolleyAwake) {
-    if (buttonPressed(BTN_START)) {
+    if (switchOn) {                       // just latched ON — wake up!
       trolleyAwake = true;
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);      // green = following mode!
+      showColor(0, 255, 0);               // green = following mode!
       beep(1, 100);                       // happy little beep
       showTotal();
       Serial.println("Cart-E is awake and following!");
     }
-    return;  // still asleep — skip everything below and check again
+    return;  // still off — skip everything below and check again
   }
 
-  /* ---- STEP 1: EMERGENCY always comes first! ---- */
-  if (buttonPressed(BTN_EMERGENCY)) {
-    emergencyStop();
+  if (!switchOn) {                        // released while driving —
+    emergencyStop();                      // STOP EVERYTHING, go to sleep
     return;
   }
 
@@ -329,57 +390,65 @@ void doMove(Move m) {
   switch (m) {
 
     case FORWARD:
-      setLights(true, false, false);    // green
+      showColor(0, 255, 0);               // green = happy following
       goForward();
       break;
 
     case REVERSE:
-      setLights(true, false, false);    // green
+      showColor(0, 255, 0);               // green
       goBackward();
       break;
 
-    case TURN_LEFT:                     // left wheel stops,
-      setLights(true, false, false);    // right wheel pushes -> we swing left
+    case TURN_LEFT:                       // left wheel stops,
+      showColor(0, 255, 0);               // right wheel pushes -> swing left
       motorM1(0); motorM2(+1);
       break;
 
-    case TURN_RIGHT:                    // right wheel stops,
-      setLights(true, false, false);    // left wheel pushes -> we swing right
+    case TURN_RIGHT:                      // right wheel stops,
+      showColor(0, 255, 0);               // left wheel pushes -> swing right
       motorM1(+1); motorM2(0);
       break;
 
-    case LOST:                          // person gone or too fast:
-      setLights(false, false, true);    // yellow = "wait for me!"
+    case LOST:                            // person gone or too fast:
       stopMotors();
-      beep(1, 300);                     // one long beep
-      blinkLed(LED_RED);                // red blinking too
+      showColor(255, 150, 0);             // yellow = "wait for me!"
+      beep(1, 300);                       // one long beep
+      showColor(255, 0, 0);               // quick red flash too
+      delay(100);
+      showColor(255, 150, 0);
       break;
 
-    case WAIT:                          // confused — just hold still
-      setLights(false, false, true);    // yellow
+    case WAIT:                            // confused — just hold still
+      showColor(255, 150, 0);             // yellow
       stopMotors();
       break;
 
     case STOP:
     default:
-      setLights(true, false, false);    // green (happy, just resting)
+      showColor(0, 255, 0);               // green (happy, just resting)
       stopMotors();
       break;
   }
 }
 
 /* ============================================================
- *  MOTOR HELPERS
+ *  MOTOR HELPERS — using the Robo ESP32's built-in driver
+ *  From the Cytron truth table:
+ *    A HIGH + B LOW  = forward
+ *    A LOW  + B HIGH = backward
+ *    A LOW  + B LOW  = brake (stop)
  *  motorM1 / motorM2 take: +1 = forward, -1 = backward, 0 = stop
+ *  (If a wheel spins the wrong way, just swap its two motor
+ *   wires on the green terminal — no code change needed!)
  * ============================================================ */
 void motorM1(int dir) {
-  digitalWrite(M1_IN1, dir > 0 ? HIGH : LOW);
-  digitalWrite(M1_IN2, dir < 0 ? HIGH : LOW);
+  digitalWrite(M1_A, dir > 0 ? HIGH : LOW);
+  digitalWrite(M1_B, dir < 0 ? HIGH : LOW);
 }
 
 void motorM2(int dir) {
-  digitalWrite(M2_IN3, dir > 0 ? HIGH : LOW);
-  digitalWrite(M2_IN4, dir < 0 ? HIGH : LOW);
+  digitalWrite(M2_A, dir > 0 ? HIGH : LOW);
+  digitalWrite(M2_B, dir < 0 ? HIGH : LOW);
 }
 
 void goForward()  { motorM1(+1); motorM2(+1); }
@@ -488,62 +557,66 @@ void showTotal() {
 
 /* ============================================================
  *  EMERGENCY STOP — case 13, beats everything else
+ *  Happens the moment the latching button is released (OFF).
+ *  The shopping total is kept safe — nothing is lost!
  * ============================================================ */
 void emergencyStop() {
   stopMotors();
-  setLights(false, true, false);       // red on
+  showColor(255, 0, 0);                // red
   beep(3, 200);
-  Serial.println("EMERGENCY STOP!");
+  Serial.println("EMERGENCY STOP! (button released)");
 
   oled.clearDisplay();
   oled.setCursor(0, 0);
   oled.setTextSize(2);
   oled.println("STOPPED!");
   oled.setTextSize(1);
-  oled.println("Press START to");
-  oled.println("continue shopping");
+  oled.println("Press the button");
+  oled.println("to shop again");
   oled.display();
 
-  trolleyAwake = false;                // go back to sleep until START
+  trolleyAwake = false;                // asleep until latched ON again
 }
 
 /* ============================================================
- *  SMALL HELPERS — buttons, lights, beeps
+ *  SMALL HELPERS — switch, rainbow LEDs, beeps
  * ============================================================ */
 
-// Returns true ONCE when a button is pressed (with debounce —
-// real buttons "bounce" like a ball, so we wait 30 ms to be sure)
-bool buttonPressed(int pin) {
-  if (digitalRead(pin) == LOW) {       // LOW = pressed (pull-up wiring)
-    delay(30);
-    if (digitalRead(pin) == LOW) {
-      while (digitalRead(pin) == LOW) { delay(5); } // wait for release
-      return true;
-    }
+// Reads the latching switch: true = latched ON, false = OFF.
+// Real switches "bounce" (flicker) for a few milliseconds when they
+// change, so if the reading changed we double-check after 30 ms.
+bool switchIsOn() {
+  static bool lastState = false;          // remembers between loops
+  bool nowState = (digitalRead(SW_POWER) == LOW);  // LOW = latched ON
+
+  if (nowState != lastState) {            // did it just change?
+    delay(30);                            // wait out the bounce...
+    nowState = (digitalRead(SW_POWER) == LOW);     // ...and re-check
+    lastState = nowState;
   }
-  return false;
+  return nowState;
 }
 
-// Turn the three status lights on/off in one tidy line
-void setLights(bool green, bool red, bool yellow) {
-  digitalWrite(LED_GREEN,  green  ? HIGH : LOW);
-  digitalWrite(LED_RED,    red    ? HIGH : LOW);
-  digitalWrite(LED_YELLOW, yellow ? HIGH : LOW);
+// Paint BOTH onboard rainbow LEDs the same colour.
+// (red, green, blue) each go from 0 (off) to 255 (full power).
+//   green  = (0, 255, 0)     red = (255, 0, 0)
+//   yellow = (255, 150, 0)   off = (0, 0, 0)
+void showColor(int r, int g, int b) {
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    pixels.setPixelColor(i, pixels.Color(r, g, b));
+  }
+  pixels.show();
 }
 
-// Beep n times, each lasting ms milliseconds
+// Beep n times, each lasting ms milliseconds.
+// The Robo ESP32 buzzer is a PIEZO — it needs a musical note
+// (a frequency), not just ON/OFF. tone() plays the note for us.
+// 2000 Hz is a nice clear "robot beep" pitch.
 void beep(int n, int ms) {
   for (int i = 0; i < n; i++) {
-    digitalWrite(BUZZER, HIGH);
+    tone(BUZZER, 2000);       // start singing at 2000 Hz
     delay(ms);
-    digitalWrite(BUZZER, LOW);
+    noTone(BUZZER);           // stop singing
     if (i < n - 1) delay(ms);
   }
-}
-
-// One quick blink of any LED (used for the red "lost" blink)
-void blinkLed(int pin) {
-  digitalWrite(pin, HIGH);
-  delay(100);
-  digitalWrite(pin, LOW);
 }
