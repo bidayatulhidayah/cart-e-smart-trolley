@@ -57,8 +57,8 @@ const int M1_A = 12;   // Motor 1 (LEFT wheel)
 const int M1_B = 13;
 const int M2_A = 14;   // Motor 2 (RIGHT wheel)
 const int M2_B = 27;
-
-const int BUZZER     = 23;  // built-in + external in parallel
+ 
+const int BUZZER     = 24;  // built-in + external in parallel asalnya 23
 const int NEOPIXELS  = 15;  // onboard 2 + external stick in parallel
 const int NUM_PIXELS = 8;
 
@@ -68,8 +68,8 @@ const int SW_POWER = 35;    // latching button (LOW = ON)
 /* ============================================================
  *  DISTANCE RULES (cm) — TUNE THESE during testing!
  * ============================================================ */
-const int FOLLOW_DIST   = 20;
-const int LOST_DIST     = 40;
+const int FOLLOW_DIST   = 30;
+const int LOST_DIST     = 100;
 const int SIDE_GAP      = 10;
 const int GUARD_DIST    = 10;
 const int SQUEEZE_DIST  = 5;
@@ -266,9 +266,9 @@ void doMove(Move m) {
     case REVERSE:
       showColor(0, 255, 0);  goBackward();              break;
     case TURN_LEFT:
-      showColor(0, 255, 0);  motorM1(0); motorM2(+1);   break;
+      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
     case TURN_RIGHT:
-      showColor(0, 255, 0);  motorM1(+1); motorM2(0);   break;
+      showColor(0, 255, 0);  motorM1(-1); motorM2(+1);   break;
     case LOST:
       stopMotors();
       showColor(255, 150, 0);          // yellow: "wait for me!"
