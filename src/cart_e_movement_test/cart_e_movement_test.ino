@@ -287,9 +287,9 @@ void doMove(Move m) {
     case REVERSE:
       showColor(0, 255, 0);  goBackward();               break;
     case TURN_LEFT:
-      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
-    case TURN_RIGHT:
       showColor(0, 255, 0);  motorM1(-1); motorM2(+1);   break;
+    case TURN_RIGHT:
+      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
     case LOST:
       stopMotors();
       showColor(255, 150, 0);          // yellow: "wait for me!"
