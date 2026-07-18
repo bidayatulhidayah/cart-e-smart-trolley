@@ -1,38 +1,40 @@
 /*
  * ============================================================
- *  CART-E : THE HUMAN-FOLLOWING SMART TROLLEY
+ *  CART-E : THE HUMAN-FOLLOWING SMART TROLLEY  (FULL VERSION)
  * ============================================================
- *  Board  : NodeMCU ESP32 (30-pin) sitting on the
- *           CYTRON ROBO ESP32 expansion board
- *  IDE    : Arduino IDE  (select board "NodeMCU-32S" or "ESP32 Dev Module")
+ *  Board  : NodeMCU ESP32 (30-pin) on the CYTRON ROBO ESP32
  *
- *  WHY THE ROBO ESP32 MAKES OUR LIFE EASY:
- *    - Motor driver is BUILT IN  (no L298N board needed!)
- *    - Buzzer is BUILT IN on D23 (flip its MUTE switch to ON!)
- *      Your external buzzer joins in PARALLEL on the same pin.
- *    - 2 rainbow NeoPixel LEDs BUILT IN on D15
- *      Your external NeoPixel light joins in PARALLEL too and
- *      always copies the same colour. Both, no extra pins!
+ *  This is the COMPLETE program:
+ *    MOVEMENT BRAIN v2 (tested & calibrated)  +  RFID SHOPPING
  *
- *  HOW TO THINK ABOUT THIS ROBOT:
- *  The trolley has 6 "eyes" (ultrasonic sensors):
- *    - 1 front eye (U1)      -> watches the person in front
- *    - 2 turning eyes (U2,U3)-> see gaps on the left and right
- *    - 3 bodyguard eyes      -> U4 (back-left), U5 (back-right),
- *                               U6 (back) stop us hitting things
+ *  MOVEMENT (same as the tested movement code):
+ *    closer than 27 cm  -> REVERSE
+ *    27 to 33 cm        -> STOP (the sweet spot)
+ *    33 to 150 cm       -> FORWARD (follow the person)
+ *    beyond 150 cm      -> LOST: stop + buzzer
+ *    Turning: we chase THE PERSON, not empty space. When they
+ *    turn a corner they vanish from the front eye and appear in
+ *    a corner eye -> turn that way until the front eye finds them.
  *
- *  Every loop the trolley does 4 things, in this order:
- *    1. Is the ONE button still latched ON? -> released = STOP ALL
- *    2. Where is my friend?               -> read U1, U2, U3
- *    3. What move do I want to make?      -> forward/stop/turn/back
- *    4. Do my bodyguards say it is safe?  -> read U4, U5, U6
- *  Only if the bodyguards say YES do the wheels move!
+ *  SHOPPING (new in this version):
+ *    - Tap an RFID sticker on the reader -> "boop!", item price
+ *      shows on the OLED for 20 seconds, then back to the total.
+ *    - Unknown sticker -> polite "ask staff" message.
+ *    - The total survives emergency stops — nothing is lost.
+ *
+ *  PHYSICAL SETUP REMINDERS:
+ *    - U2 and U3 angled OUTWARD 30-45 degrees, like a fan \ | /
+ *    - Buzzer MUTE switch ON (and remember: ESP32 has NO pin 24 —
+ *      the buzzer lives on D23!)
+ *    - PN532 DIP switches set to I2C mode
+ *    - RFID + OLED share I2C: SDA = D21, SCL = D22
+ *      (Grove Port 2 and the Maker Port are that same I2C line)
  *
  *  LIBRARIES YOU NEED (install from Library Manager):
  *    - Adafruit PN532        (for the RFID reader)
  *    - Adafruit SSD1306      (for the OLED screen)
  *    - Adafruit GFX Library  (helper for the screen)
- *    - Adafruit NeoPixel     (for the onboard rainbow LEDs)
+ *    - Adafruit NeoPixel     (for the rainbow LEDs)
  *    (Adafruit BusIO installs automatically as a dependency —
  *     say YES when the Library Manager asks!)
  * ============================================================
@@ -42,115 +44,75 @@
 #include <Adafruit_PN532.h>    // The RFID reader
 #include <Adafruit_GFX.h>      // Drawing helper for the screen
 #include <Adafruit_SSD1306.h>  // The OLED screen
-#include <Adafruit_NeoPixel.h> // The onboard rainbow LEDs
+#include <Adafruit_NeoPixel.h> // The rainbow LEDs
 
 /* ============================================================
- *  PIN MAP — checked against the official Cytron ROBO-ESP32
- *  datasheet, so these numbers match the board's printing!
+ *  PIN MAP  (identical to the tested movement code —
+ *  no wires need to move!)
  * ============================================================ */
 
-// --- The 6 ultrasonic sensors (each one has TRIG and ECHO) ---
-// TRIG = the mouth (sends a click), ECHO = the ear (hears it back)
-//
-// GROVE CABLE TRICK: one Grove port has exactly 4 wires
-// (signal, signal, 3V3, GND) — a perfect match for one sensor's
-// (Trig, Echo, VCC, GND)! But look closely at the board printing:
-// neighbouring Grove ports SHARE a pin (Grove 3 & 4 both have D25!)
-// and Grove 7's pins (D36/D39) can only LISTEN, never talk.
-// So we use Grove ports 1, 3 and 5 (their pins don't overlap),
-// the servo headers for two more, and the breakout header for the last:
-//
 //   U1 front       -> GROVE 1      : trig D16, echo D17
 //   U2 front-left  -> GROVE 3      : trig D26, echo D25
 //   U3 front-right -> GROVE 5      : trig D33, echo D32
 //   U4 back-left   -> servo S pins : trig D4,  echo D18
 //   U5 back-right  -> servo S pins : trig D5,  echo D19
 //   U6 back        -> breakout     : trig D2,  echo D36 (label "VP")
-//
-// (If one sensor always reads 999, its Trig/Echo wires are swapped —
-//  either swap the two wires, or swap its two numbers below!)
 const int TRIG_PIN[6] = { 16, 26, 33,  4,  5,  2 };
 const int ECHO_PIN[6] = { 17, 25, 32, 18, 19, 36 };
 
-// Friendly names so we never mix the sensors up.
-// (These are just positions 0-5 inside the arrays above.)
 const int U1_FRONT       = 0;  // front eye  - watches the person
-const int U2_FRONT_LEFT  = 1;  // turning eye - left
-const int U3_FRONT_RIGHT = 2;  // turning eye - right
+const int U2_FRONT_LEFT  = 1;  // corner eye - angled out ~30-45deg left
+const int U3_FRONT_RIGHT = 2;  // corner eye - angled out ~30-45deg right
 const int U4_BACK_LEFT   = 3;  // bodyguard  - back-left corner
 const int U5_BACK_RIGHT  = 4;  // bodyguard  - back-right corner
 const int U6_BACK        = 5;  // bodyguard  - straight behind us
 
-// --- Motors: the driver is BUILT INTO the Robo ESP32! ---
-// From the Cytron datasheet's truth table:
-//   A = HIGH, B = LOW  -> motor spins FORWARD
-//   A = LOW,  B = HIGH -> motor spins BACKWARD
-//   A = LOW,  B = LOW  -> brake (stop)
-// Just wire M1 to the left wheel, M2 to the right wheel terminals.
-const int M1_A = 12;   // Motor 1 (LEFT wheel)  terminal M1A
-const int M1_B = 13;   //                        terminal M1B
-const int M2_A = 14;   // Motor 2 (RIGHT wheel) terminal M2A
-const int M2_B = 27;   //                        terminal M2B
+// Motors (built-in driver): A HIGH + B LOW = forward
+const int M1_A = 12;   // Motor 1 (LEFT wheel)
+const int M1_B = 13;
+const int M2_A = 14;   // Motor 2 (RIGHT wheel)
+const int M2_B = 27;
 
-// --- Buzzers: built-in AND external, singing together! ---
-// The Robo ESP32 has a piezo buzzer built in on D23 (flip its
-// MUTE switch to ON). Your EXTERNAL buzzer connects IN PARALLEL:
-// wire it to the D23 breakout pin + GND, and both buzzers get the
-// same song at the same time — like a duet, no extra pin needed.
-// (Use a small PASSIVE piezo buzzer, or a buzzer module with its
-//  own little transistor, so we don't overwork the pin.)
-const int BUZZER    = 23;
+// CAREFUL: the ESP32 has NO pin 24 (numbering skips 24 and 28-31)!
+// The buzzer lives on D23. Want it quiet? Use the board's MUTE switch.
+const int BUZZER     = 23;  // built-in + external in parallel
+const int NEOPIXELS  = 15;  // onboard 2 + external stick in parallel
+const int NUM_PIXELS = 8;
 
-// --- Rainbow LEDs: built-in AND external, matching colours! ---
-// The 2 onboard NeoPixels sit on D15. Your EXTERNAL NeoPixel
-// module/stick connects IN PARALLEL to the same D15 breakout pin
-// (+ 3V3 + GND). It receives the exact same colour message, so the
-// big external light always copies the small onboard ones. Magic!
-const int NEOPIXELS  = 15;
-const int NUM_PIXELS = 8;  // covers 2 onboard + an external stick of
-                           // up to 8 lights. External strip longer?
-                           // Just raise this number to match it.
+const int SW_POWER = 35;    // latching button (LOW = ON)
+                            // onboard button "1" shares this pin
 
-// --- THE ONE AND ONLY BUTTON ---
-// A self-latching SPST push button (normally open):
-//   press once  -> it latches closed  -> trolley ON
-//   press again -> it springs open    -> trolley OFF (emergency stop!)
-// Because it LATCHES, we don't look for a "press" — we simply read
-// whether the switch is closed (ON) or open (OFF) right now.
-// Wire it between the D35 breakout pin and GND. D35 already has a
-// pull-up ON THE ROBO ESP32 BOARD (it belongs to onboard button 1),
-// so open = HIGH, latched = LOW.
-// Bonus: onboard button "1" is on the same pin — holding it down
-// works as a quick test of the trolley without your big button!
-const int SW_POWER = 35;  // LOW = latched ON, HIGH = released OFF
-
-// (The RFID reader and OLED both plug into I2C: SDA = D21, SCL = D22.
-//  On the Robo ESP32 that is Grove Port 2 or the Maker Port —
-//  like two friends sharing one phone line.)
+// (RFID reader and OLED both plug into I2C: SDA = D21, SCL = D22.)
 
 /* ============================================================
- *  DISTANCE RULES  (all in centimetres)
- *  These numbers decide how the trolley behaves. You can tune
- *  them during testing — that's what engineers do!
+ *  DISTANCE RULES (cm) — the calibrated numbers!
+ *
+ *  Follow bands (built from FOLLOW_DIST 30 +/- DEAD_ZONE 3):
+ *      0 ......27 : REVERSE  (person too close, back away)
+ *     27 ......33 : STOP     (perfect distance — the sweet spot)
+ *     33 .....150 : FORWARD  (chase the person)
+ *    150 ......   : LOST     (stop + buzzer — person gone)
  * ============================================================ */
-const int FOLLOW_DIST   = 20;  // perfect distance to the person
-const int LOST_DIST     = 40;  // further than this = person is gone
-const int SIDE_GAP      = 10;  // U2/U3 closer than this = person/wall beside us
-const int GUARD_DIST    = 10;  // bodyguards: closer than this = DANGER
-const int SQUEEZE_DIST  = 5;   // sides really scraping something
-const int DEAD_ZONE     = 3;   // +/- wiggle room so we don't jitter
+const int FOLLOW_DIST   = 30;   // middle of the STOP sweet spot
+const int DEAD_ZONE     = 3;    // sweet spot = 30 +/- 3 = 27 to 33
+const int LOST_DIST     = 150;  // beyond this = person is gone
+const int PERSON_RANGE  = 60;   // corner eye sees the person within this
+const int GUARD_DIST    = 10;   // bodyguards: closer = DANGER
+const int SQUEEZE_DIST  = 5;    // sides really scraping something
 
-/* ============================================================
- *  THE MOVES the trolley can choose from
- * ============================================================ */
 enum Move { STOP, FORWARD, REVERSE, TURN_LEFT, TURN_RIGHT, LOST, WAIT };
+
+// Names for printing, in the SAME order as the enum above
+const char* MOVE_NAME[] =
+  { "STOP", "FORWARD", "REVERSE", "TURN LEFT", "TURN RIGHT",
+    "LOST - wait for me!", "WAIT - confused" };
 
 /* ============================================================
  *  RFID PRICE LIST
  *  Each sticker has a unique ID (UID). We keep a little price
  *  list here, like a mini shop database.
  *  HOW TO ADD YOUR OWN ITEMS:
- *   1. Upload this code and open the Serial Monitor.
+ *   1. Upload this code and open the Serial Monitor (115200).
  *   2. Tap a sticker — its UID is printed.
  *   3. Copy the UID into this list with a name and price.
  * ============================================================ */
@@ -170,7 +132,6 @@ const int NUM_ITEMS = sizeof(shopItems) / sizeof(shopItems[0]);
 
 /* ============================================================
  *  GLOBAL OBJECTS AND VARIABLES
- *  ("Global" = the whole program can see them)
  * ============================================================ */
 
 // RFID reader on I2C. The -1, -1 means "IRQ and RESET pins are
@@ -179,29 +140,30 @@ Adafruit_PN532 rfid(-1, -1, &Wire);
 
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);          // 128x64 OLED screen
 
-// The two onboard rainbow LEDs (NeoPixels) on pin D15
 Adafruit_NeoPixel pixels(NUM_PIXELS, NEOPIXELS, NEO_GRB + NEO_KHZ800);
 
 bool  trolleyAwake   = false;  // is the latching button switched ON?
 float totalPrice     = 0.0;    // running total of the shopping
 long  lastFrontDist  = FOLLOW_DIST; // remembers last U1 reading
-                                    // (to spot "person ran away!")
 
 // Timer for showing an item price for 20 seconds on the OLED.
 // We use millis() (a stopwatch) instead of delay() (freezing),
-// so the trolley can keep driving while the screen counts down.
+// so the trolley keeps driving while the screen counts down.
 unsigned long itemShownAt   = 0;
 bool          showingItem   = false;
 const unsigned long SHOW_ITEM_MS = 20000; // 20 seconds
+
+// Print the robot's "thoughts" every 300 ms (not every loop)
+unsigned long lastPrintAt = 0;
 
 /* ============================================================
  *  SETUP — runs ONCE when the trolley is switched on
  * ============================================================ */
 void setup() {
-  Serial.begin(115200);           // so we can print messages to the computer
-  Serial.println("Cart-E (Robo ESP32 edition) is starting up...");
+  Serial.begin(115200);
+  Serial.println();
+  Serial.println("=== CART-E FULL VERSION starting up... ===");
 
-  // Tell every pin what job it has (INPUT = ear, OUTPUT = mouth)
   for (int i = 0; i < 6; i++) {
     pinMode(TRIG_PIN[i], OUTPUT);
     pinMode(ECHO_PIN[i], INPUT);
@@ -210,17 +172,15 @@ void setup() {
   pinMode(M1_A, OUTPUT);  pinMode(M1_B, OUTPUT);
   pinMode(M2_A, OUTPUT);  pinMode(M2_B, OUTPUT);
   pinMode(BUZZER, OUTPUT);
-  // D35 is an "ears-only" pin and the Robo ESP32 board already
-  // gives it a pull-up resistor, so plain INPUT is all we need.
-  pinMode(SW_POWER, INPUT);          // switch wired to GND
+  pinMode(SW_POWER, INPUT);   // board already has the pull-up
 
-  stopMotors();                   // always start standing still!
+  stopMotors();               // always start standing still!
 
-  pixels.begin();                 // wake up the rainbow LEDs
-  pixels.setBrightness(60);       // not too bright — save the eyes!
-  showColor(255, 0, 0);           // red while sleeping
+  pixels.begin();
+  pixels.setBrightness(60);
+  showColor(255, 0, 0);       // red = sleeping
 
-  Wire.begin(21, 22);             // start the I2C party line
+  Wire.begin(21, 22);         // start the I2C party line
 
   // --- Wake up the OLED screen ---
   if (!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -239,7 +199,7 @@ void setup() {
   if (!rfid.getFirmwareVersion()) {
     Serial.println("PN532 not found - check the wiring!");
   } else {
-    rfid.SAMConfig();             // "SAM config" = get ready to read cards
+    rfid.SAMConfig();         // "SAM config" = get ready to read cards
     Serial.println("RFID reader ready!");
   }
 }
@@ -249,18 +209,18 @@ void setup() {
  * ============================================================ */
 void loop() {
 
-  /* ---- STEP 0 + 1: Read the ONE button (power + emergency) ----
+  /* ---- STEP 0 + 1: The ONE button (power + emergency) ----
    * Latched closed = ON.  Released open = OFF.
-   * Turning it off while driving IS the emergency stop!            */
+   * Turning it off while driving IS the emergency stop!        */
   bool switchOn = switchIsOn();
 
   if (!trolleyAwake) {
     if (switchOn) {                       // just latched ON — wake up!
       trolleyAwake = true;
-      showColor(0, 255, 0);               // green = following mode!
-      beep(1, 100);                       // happy little beep
+      showColor(0, 255, 0);
+      beep(1, 100);
       showTotal();
-      Serial.println("Cart-E is awake and following!");
+      Serial.println(">>> AWAKE! Following mode ON");
     }
     return;  // still off — skip everything below and check again
   }
@@ -270,212 +230,198 @@ void loop() {
     return;
   }
 
-  /* ---- STEP 2: Where is my friend? (read the front 3 eyes) ---- */
-  long dFront = readDistanceCm(U1_FRONT);
-  long dLeft  = readDistanceCm(U2_FRONT_LEFT);
-  long dRight = readDistanceCm(U3_FRONT_RIGHT);
+  /* ---- STEP 2: Read ALL 6 eyes ---- */
+  long dFront     = readDistanceCm(U1_FRONT);
+  long dLeft      = readDistanceCm(U2_FRONT_LEFT);
+  long dRight     = readDistanceCm(U3_FRONT_RIGHT);
+  long dBackLeft  = readDistanceCm(U4_BACK_LEFT);
+  long dBackRight = readDistanceCm(U5_BACK_RIGHT);
+  long dBack      = readDistanceCm(U6_BACK);
 
-  /* ---- STEP 3: Choose a move (cases 1-6, 11, 12) ---- */
-  Move wantedMove = chooseMove(dFront, dLeft, dRight);
+  /* ---- STEP 3: Think, check safety, then move ---- */
+  Move wanted = chooseMove(dFront, dLeft, dRight);
+  Move safe   = safetyCheck(wanted, dBackLeft, dBackRight, dBack);
+  doMove(safe);
 
-  /* ---- STEP 4: Ask the bodyguards (cases 7-10) ---- */
-  Move safeMove = safetyCheck(wantedMove);
-
-  /* ---- STEP 5: Do the move! ---- */
-  doMove(safeMove);
-
-  /* ---- STEP 6: Any shopping scanned? ---- */
+  /* ---- STEP 4: Any shopping scanned? ---- */
   checkRFID();
 
-  /* ---- STEP 7: Has the 20-second price display finished? ---- */
+  /* ---- STEP 5: Has the 20-second price display finished? ---- */
   updateScreenTimer();
+
+  /* ---- STEP 6: Show the trolley's "thoughts" every 300 ms ---- */
+  if (millis() - lastPrintAt > 300) {
+    lastPrintAt = millis();
+    Serial.print("U1:");  Serial.print(dFront);
+    Serial.print(" U2:"); Serial.print(dLeft);
+    Serial.print(" U3:"); Serial.print(dRight);
+    Serial.print(" U4:"); Serial.print(dBackLeft);
+    Serial.print(" U5:"); Serial.print(dBackRight);
+    Serial.print(" U6:"); Serial.print(dBack);
+    Serial.print("  ->  ");
+    Serial.print(MOVE_NAME[safe]);
+    if (safe != wanted) {
+      Serial.print("  (bodyguards vetoed: ");
+      Serial.print(MOVE_NAME[wanted]);
+      Serial.print(")");
+    }
+    Serial.println();
+  }
 
   lastFrontDist = dFront;   // remember for the "too fast" check
   delay(30);                // tiny rest so sensors don't argue
 }
 
 /* ============================================================
- *  CHOOSE MOVE — the trolley's brain
- *  Looks at the front 3 eyes and picks what it WANTS to do.
- *  (The bodyguards may still say no afterwards!)
+ *  CHOOSE MOVE — the trolley's brain  (movement v2, calibrated)
+ *
+ *  THE BIG IDEA for turning: follow the person, not the gaps!
+ *  When the person walks around a corner, they DISAPPEAR from
+ *  the front eye and APPEAR in a corner eye. So:
+ *    front eye lost them + left  eye sees them -> TURN LEFT
+ *    front eye lost them + right eye sees them -> TURN RIGHT
+ *  We keep turning until the front eye finds them again, then
+ *  the normal forward/stop/reverse logic takes over.
  * ============================================================ */
 Move chooseMove(long dFront, long dLeft, long dRight) {
 
-  // CASE 12: person moved TOO FAST — they "vanished" in one step.
-  // Last time they were close, now suddenly very far.
-  if (lastFrontDist < FOLLOW_DIST + 5 && dFront > LOST_DIST) {
-    return LOST;   // "Wait for meee!"
-  }
+  // Three simple yes/no questions the trolley asks itself:
+  bool personFront = (dFront <= LOST_DIST);     // someone within 150 cm ahead?
+  bool personLeft  = (dLeft  <  PERSON_RANGE);  // someone in the left  fan?
+  bool personRight = (dRight <  PERSON_RANGE);  // someone in the right fan?
 
-  // CASE 11: CONFUSED — something close on BOTH sides at once.
-  // Maybe two people walked past. Safer to wait than to guess.
-  if (dLeft < SIDE_GAP && dRight < SIDE_GAP && dFront > LOST_DIST) {
-    return WAIT;
-  }
-
-  // CASE 5: person moved to the LEFT (left eye sees them close,
-  // front eye sees empty space) -> turn left to follow.
-  if (dLeft < SIDE_GAP && dFront > FOLLOW_DIST) {
-    return TURN_LEFT;
-  }
-
-  // CASE 6: person moved to the RIGHT -> turn right to follow.
-  if (dRight < SIDE_GAP && dFront > FOLLOW_DIST) {
-    return TURN_RIGHT;
-  }
-
-  // CASE 4: ABANDONED — nobody in front anymore.
-  if (dFront > LOST_DIST) {
+  // CASE 12: person vanished in ONE step — they ran off too fast!
+  if (lastFrontDist < FOLLOW_DIST + 10 && dFront > LOST_DIST) {
     return LOST;
   }
 
-  // CASE 3: person is TOO CLOSE — politely back away.
-  if (dFront < FOLLOW_DIST - DEAD_ZONE) {
-    return REVERSE;
+  // The person IS in front — normal following (cases 1, 2, 3):
+  if (personFront) {
+    if (dFront < FOLLOW_DIST - DEAD_ZONE) return REVERSE;  // under 27
+    if (dFront > FOLLOW_DIST + DEAD_ZONE) return FORWARD;  // 33 to 150
+    return STOP;                                           // 27-33 sweet spot
   }
 
-  // CASE 1: person is comfortably ahead — follow them!
-  if (dFront > FOLLOW_DIST + DEAD_ZONE) {
-    return FORWARD;
+  // From here on, the front eye sees NOBODY. Where did they go?
+
+  // CASE 11: BOTH corner eyes see something — two people passing?
+  // A narrow aisle? Too confusing — safer to wait than to guess.
+  if (personLeft && personRight) {
+    return WAIT;
   }
 
-  // CASE 2: person is at the perfect distance — stand still.
-  return STOP;
+  // CASE 5: they appeared in the LEFT fan -> chase them left!
+  if (personLeft) {
+    return TURN_LEFT;
+  }
+
+  // CASE 6: they appeared in the RIGHT fan -> chase them right!
+  if (personRight) {
+    return TURN_RIGHT;
+  }
+
+  // CASE 4: nobody anywhere — abandoned. Stop, buzz, wait.
+  return LOST;
 }
 
 /* ============================================================
- *  SAFETY CHECK — the bodyguards get the final word
- *  Takes the move the brain wants, and vetoes it if the back
- *  sensors see danger. Safety ALWAYS wins over wanting!
+ *  SAFETY CHECK — bodyguards veto dangerous moves (cases 7-10)
  * ============================================================ */
-Move safetyCheck(Move wanted) {
-  long dBackLeft  = readDistanceCm(U4_BACK_LEFT);
-  long dBackRight = readDistanceCm(U5_BACK_RIGHT);
-  long dBack      = readDistanceCm(U6_BACK);
+Move safetyCheck(Move wanted, long dBackLeft, long dBackRight, long dBack) {
 
-  // CASE 7: wants to reverse, but something is BEHIND us.
+  // CASE 7: can't reverse — something behind us!
   if (wanted == REVERSE && dBack < GUARD_DIST) {
-    beep(2, 80);          // "beep beep - can't go back!"
+    beep(2, 80);
     return STOP;
   }
 
-  // CASE 8: wants to turn left, but the back-left corner would
-  // swing into a rack. (When you turn, your back sticks out!)
+  // CASE 8: can't turn left — back-left corner would hit the rack!
   if (wanted == TURN_LEFT && dBackLeft < GUARD_DIST) {
     beep(2, 80);
     return STOP;
   }
 
-  // CASE 9: same idea for turning right.
+  // CASE 9: can't turn right — same on the other side.
   if (wanted == TURN_RIGHT && dBackRight < GUARD_DIST) {
     beep(2, 80);
     return STOP;
   }
 
-  // CASE 10: SQUEEZED — driving forward but scraping a rack
-  // or a person on our side. Stop before we bump them.
+  // CASE 10: squeezed against something while going forward.
   if (wanted == FORWARD &&
       (dBackLeft < SQUEEZE_DIST || dBackRight < SQUEEZE_DIST)) {
     beep(3, 60);
     return STOP;
   }
 
-  return wanted;   // bodyguards say: "all clear, go ahead!"
+  return wanted;
 }
 
 /* ============================================================
- *  DO MOVE — turn the chosen move into wheel commands + lights
+ *  DO MOVE — wheels + lights
+ *  (Turn directions are the CALIBRATED ones from testing —
+ *   the spin turn, both wheels opposite ways.)
  * ============================================================ */
 void doMove(Move m) {
   switch (m) {
-
     case FORWARD:
-      showColor(0, 255, 0);               // green = happy following
-      goForward();
-      break;
-
+      showColor(0, 255, 0);  goForward();                break;
     case REVERSE:
-      showColor(0, 255, 0);               // green
-      goBackward();
-      break;
-
-    case TURN_LEFT:                       // left wheel stops,
-      showColor(0, 255, 0);               // right wheel pushes -> swing left
-      motorM1(0); motorM2(+1);
-      break;
-
-    case TURN_RIGHT:                      // right wheel stops,
-      showColor(0, 255, 0);               // left wheel pushes -> swing right
-      motorM1(+1); motorM2(0);
-      break;
-
-    case LOST:                            // person gone or too fast:
+      showColor(0, 255, 0);  goBackward();               break;
+    case TURN_LEFT:
+      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
+    case TURN_RIGHT:
+      showColor(0, 255, 0);  motorM1(-1); motorM2(+1);   break;
+    case LOST:
       stopMotors();
-      showColor(255, 150, 0);             // yellow = "wait for me!"
-      beep(1, 300);                       // one long beep
-      showColor(255, 0, 0);               // quick red flash too
-      delay(100);
-      showColor(255, 150, 0);
+      showColor(255, 150, 0);          // yellow: "wait for me!"
+      beep(1, 300);
       break;
-
-    case WAIT:                            // confused — just hold still
-      showColor(255, 150, 0);             // yellow
+    case WAIT:
       stopMotors();
+      showColor(255, 150, 0);          // yellow: thinking...
       break;
-
     case STOP:
     default:
-      showColor(0, 255, 0);               // green (happy, just resting)
       stopMotors();
+      showColor(0, 255, 0);            // green: happy, resting
       break;
   }
 }
 
 /* ============================================================
- *  MOTOR HELPERS — using the Robo ESP32's built-in driver
- *  From the Cytron truth table:
- *    A HIGH + B LOW  = forward
- *    A LOW  + B HIGH = backward
- *    A LOW  + B LOW  = brake (stop)
- *  motorM1 / motorM2 take: +1 = forward, -1 = backward, 0 = stop
- *  (If a wheel spins the wrong way, just swap its two motor
- *   wires on the green terminal — no code change needed!)
+ *  MOTOR HELPERS — Cytron truth table:
+ *  A HIGH + B LOW = forward, A LOW + B HIGH = backward,
+ *  both LOW = brake. (+1 forward, -1 backward, 0 stop)
+ *  Wheel spins the wrong way? Swap its 2 wires at the terminal!
  * ============================================================ */
 void motorM1(int dir) {
   digitalWrite(M1_A, dir > 0 ? HIGH : LOW);
   digitalWrite(M1_B, dir < 0 ? HIGH : LOW);
 }
-
 void motorM2(int dir) {
   digitalWrite(M2_A, dir > 0 ? HIGH : LOW);
   digitalWrite(M2_B, dir < 0 ? HIGH : LOW);
 }
-
 void goForward()  { motorM1(+1); motorM2(+1); }
 void goBackward() { motorM1(-1); motorM2(-1); }
 void stopMotors() { motorM1(0);  motorM2(0);  }
 
 /* ============================================================
- *  READ DISTANCE — how one ultrasonic "eye" works
- *  1. TRIG sends a tiny click (too high for humans to hear)
- *  2. The click bounces off whatever is in front
- *  3. ECHO hears it come back
- *  4. Sound travels ~0.034 cm every microsecond, and the click
- *     travelled THERE AND BACK, so we divide by 2.
+ *  READ DISTANCE — send a click, time the echo.
+ *  Sound travels ~0.034 cm per microsecond, there AND back,
+ *  so we divide by 2. No echo heard = 999 (far away).
  * ============================================================ */
 long readDistanceCm(int sensor) {
   digitalWrite(TRIG_PIN[sensor], LOW);
   delayMicroseconds(2);
-  digitalWrite(TRIG_PIN[sensor], HIGH);   // send the click...
+  digitalWrite(TRIG_PIN[sensor], HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN[sensor], LOW);
 
-  // ...and time how long until we hear it back (max wait 25 ms,
-  // so one slow sensor can't freeze the whole trolley)
   long duration = pulseIn(ECHO_PIN[sensor], HIGH, 25000);
-
-  if (duration == 0) return 999;          // heard nothing = far away
-  return duration * 0.034 / 2;            // convert time -> centimetres
+  if (duration == 0) return 999;
+  return duration * 0.034 / 2;
 }
 
 /* ============================================================
@@ -564,7 +510,7 @@ void emergencyStop() {
   stopMotors();
   showColor(255, 0, 0);                // red
   beep(3, 200);
-  Serial.println("EMERGENCY STOP! (button released)");
+  Serial.println(">>> EMERGENCY STOP (button released)");
 
   oled.clearDisplay();
   oled.setCursor(0, 0);
@@ -579,28 +525,23 @@ void emergencyStop() {
 }
 
 /* ============================================================
- *  SMALL HELPERS — switch, rainbow LEDs, beeps
+ *  SMALL HELPERS — switch, lights, beeps
  * ============================================================ */
 
-// Reads the latching switch: true = latched ON, false = OFF.
-// Real switches "bounce" (flicker) for a few milliseconds when they
-// change, so if the reading changed we double-check after 30 ms.
+// Latching switch: true = ON. Double-checks after 30 ms
+// because real switches "bounce" when they change.
 bool switchIsOn() {
-  static bool lastState = false;          // remembers between loops
-  bool nowState = (digitalRead(SW_POWER) == LOW);  // LOW = latched ON
-
-  if (nowState != lastState) {            // did it just change?
-    delay(30);                            // wait out the bounce...
-    nowState = (digitalRead(SW_POWER) == LOW);     // ...and re-check
+  static bool lastState = false;
+  bool nowState = (digitalRead(SW_POWER) == LOW);
+  if (nowState != lastState) {
+    delay(30);
+    nowState = (digitalRead(SW_POWER) == LOW);
     lastState = nowState;
   }
   return nowState;
 }
 
-// Paint BOTH onboard rainbow LEDs the same colour.
-// (red, green, blue) each go from 0 (off) to 255 (full power).
-//   green  = (0, 255, 0)     red = (255, 0, 0)
-//   yellow = (255, 150, 0)   off = (0, 0, 0)
+// Paint every NeoPixel (onboard + external) the same colour.
 void showColor(int r, int g, int b) {
   for (int i = 0; i < NUM_PIXELS; i++) {
     pixels.setPixelColor(i, pixels.Color(r, g, b));
@@ -608,15 +549,12 @@ void showColor(int r, int g, int b) {
   pixels.show();
 }
 
-// Beep n times, each lasting ms milliseconds.
-// The Robo ESP32 buzzer is a PIEZO — it needs a musical note
-// (a frequency), not just ON/OFF. tone() plays the note for us.
-// 2000 Hz is a nice clear "robot beep" pitch.
+// Beep n times using tone() — the piezo needs a musical note.
 void beep(int n, int ms) {
   for (int i = 0; i < n; i++) {
-    tone(BUZZER, 2000);       // start singing at 2000 Hz
+    tone(BUZZER, 2000);
     delay(ms);
-    noTone(BUZZER);           // stop singing
+    noTone(BUZZER);
     if (i < n - 1) delay(ms);
   }
 }
