@@ -1,29 +1,31 @@
 /*
  * ============================================================
- *  CART-E MOVEMENT TEST — driving brain only!
+ *  CART-E MOVEMENT TEST v2 — now with smart turning!
  * ============================================================
  *  Board  : NodeMCU ESP32 (30-pin) on the CYTRON ROBO ESP32
  *
- *  This is the PRACTICE version: no RFID, no OLED screen.
- *  Just the 6 eyes, the wheels, the lights and the buzzer —
- *  so we can test and tune the following behaviour first.
+ *  WHAT'S NEW IN v2:
+ *   - New distance bands:  closer than 27 cm  -> REVERSE
+ *                          27 to 33 cm        -> STOP (perfect!)
+ *                          33 to 150 cm       -> FORWARD (follow)
+ *                          beyond 150 cm      -> STOP + buzzer (lost)
+ *   - Smarter turning: we turn TOWARD THE PERSON, not toward
+ *     empty space. When the person turns a corner, they vanish
+ *     from the front eye and appear in a corner eye — so the
+ *     trolley turns that way until the front eye finds them again!
+ *
+ *  IMPORTANT PHYSICAL SETUP for the new turning to work:
+ *   - Angle U2 and U3 OUTWARD about 30-45 degrees, so the three
+ *     front eyes make a wide fan:   \  |  /
+ *     If they all point straight ahead, they see the same thing
+ *     and turning can never be detected!
  *
  *  HOW TO TEST (open Serial Monitor at 115200!):
  *   1. Flip the Robo ESP32 power switch on.
  *   2. Press your latching button -> LEDs turn GREEN.
- *   3. Stand in front of the trolley and slowly walk:
- *        - walk away  -> it follows you (FORWARD)
- *        - stand still-> it stops at ~20 cm (STOP)
- *        - step closer-> it politely backs away (REVERSE)
- *        - step left  -> it turns left  (TURN_LEFT)
- *        - step right -> it turns right (TURN_RIGHT)
- *        - run away!  -> it stops, beeps, yellow (LOST)
- *   4. Watch the Serial Monitor — it shows all 6 eye readings
- *      and what the trolley decided, updated live!
- *
- *  SAFETY FIRST for the first test:
- *   - Put the trolley on a BOX so the wheels spin in the air,
- *     check every case works, THEN put it on the floor.
+ *   3. Walk in front:  away = follow, stand = stop at ~30 cm,
+ *      closer = reverse, walk around a corner = trolley turns
+ *      to chase you, run away = stop + beep.
  *
  *  LIBRARY NEEDED: only Adafruit NeoPixel (for the LEDs).
  * ============================================================
@@ -32,8 +34,7 @@
 #include <Adafruit_NeoPixel.h> // The rainbow LEDs
 
 /* ============================================================
- *  PIN MAP — same as the full Cart-E program, so wires
- *  never need to move when we upgrade later!
+ *  PIN MAP
  * ============================================================ */
 
 //   U1 front       -> GROVE 1      : trig D16, echo D17
@@ -46,8 +47,8 @@ const int TRIG_PIN[6] = { 16, 26, 33,  4,  5,  2 };
 const int ECHO_PIN[6] = { 17, 25, 32, 18, 19, 36 };
 
 const int U1_FRONT       = 0;  // front eye  - watches the person
-const int U2_FRONT_LEFT  = 1;  // turning eye - left
-const int U3_FRONT_RIGHT = 2;  // turning eye - right
+const int U2_FRONT_LEFT  = 1;  // corner eye - angled out ~30-45deg left
+const int U3_FRONT_RIGHT = 2;  // corner eye - angled out ~30-45deg right
 const int U4_BACK_LEFT   = 3;  // bodyguard  - back-left corner
 const int U5_BACK_RIGHT  = 4;  // bodyguard  - back-right corner
 const int U6_BACK        = 5;  // bodyguard  - straight behind us
@@ -57,8 +58,12 @@ const int M1_A = 12;   // Motor 1 (LEFT wheel)
 const int M1_B = 13;
 const int M2_A = 14;   // Motor 2 (RIGHT wheel)
 const int M2_B = 27;
- 
-const int BUZZER     = 24;  // built-in + external in parallel asalnya 23
+
+// CAREFUL: the ESP32 has NO pin 24 (numbering skips 24 and 28-31)!
+// Writing to "pin 24" goes nowhere — that's a silent buzzer bug.
+// The Robo ESP32 buzzer is on D23. Want it quiet during testing?
+// Use the little MUTE switch on the board instead.
+const int BUZZER     = 23;  // built-in + external in parallel
 const int NEOPIXELS  = 15;  // onboard 2 + external stick in parallel
 const int NUM_PIXELS = 8;
 
@@ -67,13 +72,19 @@ const int SW_POWER = 35;    // latching button (LOW = ON)
 
 /* ============================================================
  *  DISTANCE RULES (cm) — TUNE THESE during testing!
+ *
+ *  The follow bands (built from FOLLOW_DIST 30 +/- DEAD_ZONE 3):
+ *      0 ......27 : REVERSE  (person too close, back away)
+ *     27 ......33 : STOP     (perfect distance — the sweet spot)
+ *     33 .....150 : FORWARD  (chase the person)
+ *    150 ......   : LOST     (stop + buzzer — person gone)
  * ============================================================ */
-const int FOLLOW_DIST   = 30;
-const int LOST_DIST     = 100;
-const int SIDE_GAP      = 10;
-const int GUARD_DIST    = 10;
-const int SQUEEZE_DIST  = 5;
-const int DEAD_ZONE     = 3;
+const int FOLLOW_DIST   = 30;   // middle of the STOP sweet spot
+const int DEAD_ZONE     = 3;    // sweet spot = 30 +/- 3 = 27 to 33
+const int LOST_DIST     = 150;  // beyond this = person is gone
+const int PERSON_RANGE  = 60;   // corner eye sees the person within this
+const int GUARD_DIST    = 10;   // bodyguards: closer = DANGER
+const int SQUEEZE_DIST  = 5;    // sides really scraping something
 
 enum Move { STOP, FORWARD, REVERSE, TURN_LEFT, TURN_RIGHT, LOST, WAIT };
 
@@ -97,7 +108,7 @@ unsigned long lastPrintAt = 0;
 void setup() {
   Serial.begin(115200);
   Serial.println();
-  Serial.println("=== CART-E MOVEMENT TEST ===");
+  Serial.println("=== CART-E MOVEMENT TEST v2 ===");
   Serial.println("Press the latching button to start!");
 
   for (int i = 0; i < 6; i++) {
@@ -180,47 +191,55 @@ void loop() {
 }
 
 /* ============================================================
- *  CHOOSE MOVE — the trolley's brain (cases 1-6, 11, 12)
+ *  CHOOSE MOVE — the trolley's brain
+ *
+ *  THE BIG IDEA for turning: follow the person, not the gaps!
+ *  When the person walks around a corner, they DISAPPEAR from
+ *  the front eye and APPEAR in a corner eye. So:
+ *    front eye lost them + left  eye sees them -> TURN LEFT
+ *    front eye lost them + right eye sees them -> TURN RIGHT
+ *  We keep turning until the front eye finds them again, then
+ *  the normal forward/stop/reverse logic takes over.
  * ============================================================ */
 Move chooseMove(long dFront, long dLeft, long dRight) {
 
-  // CASE 12: person vanished in one step — moved too fast!
-  if (lastFrontDist < FOLLOW_DIST + 5 && dFront > LOST_DIST) {
+  // Three simple yes/no questions the trolley asks itself:
+  bool personFront = (dFront <= LOST_DIST);     // someone within 150 cm ahead?
+  bool personLeft  = (dLeft  <  PERSON_RANGE);  // someone in the left  fan?
+  bool personRight = (dRight <  PERSON_RANGE);  // someone in the right fan?
+
+  // CASE 12: person vanished in ONE step — they ran off too fast!
+  if (lastFrontDist < FOLLOW_DIST + 10 && dFront > LOST_DIST) {
     return LOST;
   }
 
-  // CASE 11: something close on BOTH sides — confused, wait.
-  if (dLeft < SIDE_GAP && dRight < SIDE_GAP && dFront > LOST_DIST) {
+  // The person IS in front — normal following (cases 1, 2, 3):
+  if (personFront) {
+    if (dFront < FOLLOW_DIST - DEAD_ZONE) return REVERSE;  // under 27
+    if (dFront > FOLLOW_DIST + DEAD_ZONE) return FORWARD;  // 33 to 150
+    return STOP;                                           // 27-33 sweet spot
+  }
+
+  // From here on, the front eye sees NOBODY. Where did they go?
+
+  // CASE 11: BOTH corner eyes see something — two people passing?
+  // A narrow aisle? Too confusing — safer to wait than to guess.
+  if (personLeft && personRight) {
     return WAIT;
   }
 
-  // CASE 5: person moved LEFT -> turn left.
-  if (dLeft < SIDE_GAP && dFront > FOLLOW_DIST) {
+  // CASE 5: they appeared in the LEFT fan -> chase them left!
+  if (personLeft) {
     return TURN_LEFT;
   }
 
-  // CASE 6: person moved RIGHT -> turn right.
-  if (dRight < SIDE_GAP && dFront > FOLLOW_DIST) {
+  // CASE 6: they appeared in the RIGHT fan -> chase them right!
+  if (personRight) {
     return TURN_RIGHT;
   }
 
-  // CASE 4: nobody in front — abandoned.
-  if (dFront > LOST_DIST) {
-    return LOST;
-  }
-
-  // CASE 3: too close — back away politely.
-  if (dFront < FOLLOW_DIST - DEAD_ZONE) {
-    return REVERSE;
-  }
-
-  // CASE 1: comfortably ahead — follow!
-  if (dFront > FOLLOW_DIST + DEAD_ZONE) {
-    return FORWARD;
-  }
-
-  // CASE 2: perfect distance — stand still.
-  return STOP;
+  // CASE 4: nobody anywhere — abandoned. Stop, buzz, wait.
+  return LOST;
 }
 
 /* ============================================================
@@ -258,13 +277,15 @@ Move safetyCheck(Move wanted, long dBackLeft, long dBackRight, long dBack) {
 
 /* ============================================================
  *  DO MOVE — wheels + lights
+ *  (Turn directions below are YOUR calibrated ones — the spin
+ *   turn, both wheels opposite ways, rotates on the spot.)
  * ============================================================ */
 void doMove(Move m) {
   switch (m) {
     case FORWARD:
-      showColor(0, 255, 0);  goForward();               break;
+      showColor(0, 255, 0);  goForward();                break;
     case REVERSE:
-      showColor(0, 255, 0);  goBackward();              break;
+      showColor(0, 255, 0);  goBackward();               break;
     case TURN_LEFT:
       showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
     case TURN_RIGHT:
