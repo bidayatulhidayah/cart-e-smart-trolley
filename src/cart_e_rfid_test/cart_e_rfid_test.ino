@@ -21,17 +21,27 @@
  *
  *  WHAT THIS DOES:
  *  All 10 shop items are already registered below. Tap an item:
- *   - Known sticker  -> prints the item name + price ("the shop works!")
- *   - Unknown sticker-> prints the UID + a ready-to-paste line so
- *                       you can add new items easily.
+ *   - Known sticker  -> "boop-less" bench version: the OLED shows
+ *     the item name + price for 20 seconds, then goes back to the
+ *     running TOTAL — exactly how the real trolley will behave.
+ *   - Unknown sticker-> OLED says "Unknown item", and the Serial
+ *     Monitor prints a ready-to-paste line to register it.
+ *
+ *  OLED: 0.96" 128x64 blue I2C display (SSD1306). It shares the
+ *  SAME two I2C wires as the PN532 (SDA=D21, SCL=D22) — plug it
+ *  into the Maker Port / Grove Port 2, or parallel the wires.
+ *  PN532 answers at address 0x24, OLED at 0x3C — no clash.
  *
  *  Open Serial Monitor at 115200.
- *  LIBRARY NEEDED: Adafruit PN532
+ *  LIBRARIES NEEDED: Adafruit PN532, Adafruit SSD1306,
+ *                    Adafruit GFX Library
  * ============================================================
  */
 
 #include <Wire.h>
 #include <Adafruit_PN532.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 #define SDA_PIN     21
 #define SCL_PIN     22
@@ -40,6 +50,15 @@
 
 // Real IRQ + RESET pins — the way that actually works on our module.
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
+
+// The 0.96" blue OLED (128x64) on the same I2C bus, address 0x3C.
+Adafruit_SSD1306 oled(128, 64, &Wire, -1);
+
+// Timer for showing a scanned item for 20 seconds, then the total.
+// millis() = a stopwatch, so nothing freezes while we wait.
+unsigned long itemShownAt = 0;
+bool          showingItem = false;
+const unsigned long SHOW_ITEM_MS = 20000;   // 20 seconds
 
 // Some ESP32 boards don't define LED_BUILTIN — use GPIO2 as fallback.
 #ifndef LED_BUILTIN
@@ -146,6 +165,17 @@ void setup() {
   Serial.println(F("=== STEP 5: SAMConfig (enable card reading) ==="));
   nfc.SAMConfig();
 
+  Serial.println(F("=== STEP 6: Starting the OLED display ==="));
+  if (!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("WARNING: OLED not found at 0x3C - check its"));
+    Serial.println(F("wiring (it should have appeared in the Step 2"));
+    Serial.println(F("bus scan). Continuing without the screen."));
+  } else {
+    Serial.println(F("OK - OLED alive"));
+  }
+  oled.setTextColor(SSD1306_WHITE);
+  showTotal();                       // screen starts at RM 0.00
+
   Serial.println();
   Serial.print(F("SHOP OPEN! "));
   Serial.print(NUM_ITEMS);
@@ -157,6 +187,12 @@ void setup() {
  *  LOOP — tap items, watch the shop work
  * ============================================================ */
 void loop() {
+  // Has the 20-second item display finished? Back to the total.
+  if (showingItem && millis() - itemShownAt >= SHOW_ITEM_MS) {
+    showingItem = false;
+    showTotal();
+  }
+
   uint8_t uid[7];
   uint8_t uidLength;
 
@@ -189,6 +225,8 @@ void loop() {
       Serial.print(F("Running total: RM "));
       Serial.println(totalPrice, 2);
       Serial.println(F("--------------------------------------"));
+
+      showItem(shopItems[i].name, shopItems[i].price);
       return;
     }
   }
@@ -214,4 +252,56 @@ void loop() {
   Serial.print(uidLength);
   Serial.println(F(", \"ITEM NAME\", 0.00 },"));
   Serial.println(F("--------------------------------------"));
+
+  showUnknown();
+}
+
+/* ============================================================
+ *  OLED SCREENS — same look as the real trolley will have
+ * ============================================================ */
+
+// The everyday screen: the running total, in big numbers.
+void showTotal() {
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println(F("Your total:"));
+  oled.setCursor(0, 24);
+  oled.setTextSize(2);               // big friendly numbers
+  oled.print(F("RM "));
+  oled.println(totalPrice, 2);
+  oled.display();
+}
+
+// A scanned item: name + price, stays for 20 seconds.
+void showItem(const char *name, float price) {
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println(F("Item added:"));
+  oled.setCursor(0, 16);
+  oled.setTextSize(1);
+  oled.println(name);
+  oled.setCursor(0, 34);
+  oled.setTextSize(2);
+  oled.print(F("RM "));
+  oled.println(price, 2);
+  oled.display();
+
+  showingItem = true;
+  itemShownAt = millis();            // start the 20 s stopwatch
+}
+
+// A sticker we don't know.
+void showUnknown() {
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println(F("Unknown item :("));
+  oled.println(F(""));
+  oled.println(F("Ask staff for help"));
+  oled.display();
+
+  showingItem = true;                // also returns to total after 20 s
+  itemShownAt = millis();
 }
