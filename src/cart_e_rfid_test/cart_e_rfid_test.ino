@@ -24,13 +24,25 @@
  *   - Known sticker  -> "boop!" on the buzzer, the OLED shows the
  *     item name + price for 20 seconds, then goes back to the
  *     running TOTAL — exactly how the real trolley will behave.
+ *   - SCAN-ONCE RULE: each sticker can be in the cart only ONCE.
+ *     Tapping it again is politely refused ("Already in cart") —
+ *     unless it was cancelled from the dashboard first.
  *   - Unknown sticker-> "beep-beep", OLED says "Unknown item", and
  *     the Serial Monitor prints a ready-to-paste line to register it.
  *
+ *  PAY NOW (demo checkout):
+ *  When the cart has items, a green PAY NOW button appears on the
+ *  dashboard. Confirm -> a payment screen with a QR code appears ->
+ *  "I have paid" -> happy melody, OLED says thank you, and the cart
+ *  resets to RM 0.00 for the next shopper.
+ *  (The QR is a demo placeholder — see handleDashboard() for where
+ *   to drop in a real DuitNow QR image if you want one.)
+ *
  *  SOUNDS (built-in buzzer on D23 — MUTE switch must be ON!):
  *    1 solid beep  = item added
- *    2 quick beeps = unknown sticker
+ *    2 quick beeps = unknown sticker OR already in cart
  *    tiny blip     = item cancelled from the dashboard
+ *    happy melody  = payment complete
  *
  *  OLED: 0.96" 128x64 blue I2C display (SSD1306). It shares the
  *  SAME two I2C wires as the PN532 (SDA=D21, SCL=D22) — plug it
@@ -80,7 +92,8 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 unsigned long itemShownAt = 0;
 bool          showingItem = false;
 const unsigned long SHOW_ITEM_MS    = 20000;  // scanned item: 20 s
-const unsigned long SHOW_REMOVED_MS = 5000;   // removed item: 5 s
+const unsigned long SHOW_REMOVED_MS = 5000;   // removed / refused: 5 s
+const unsigned long SHOW_PAID_MS    = 8000;   // thank-you screen: 8 s
 unsigned long showForMs = SHOW_ITEM_MS;       // how long the current screen stays
 
 /* ============================================================
@@ -176,6 +189,16 @@ void beep(int n, int ms) {
     noTone(BUZZER);
     if (i < n - 1) delay(ms);
   }
+}
+
+// Three rising notes — the "payment successful!" jingle.
+void happyMelody() {
+  int notes[3] = { 1319, 1568, 2093 };   // E6, G6, C7 — a little fanfare
+  for (int i = 0; i < 3; i++) {
+    tone(BUZZER, notes[i]);
+    delay(130);
+  }
+  noTone(BUZZER);
 }
 
 /* ============================================================
@@ -277,6 +300,7 @@ void setup() {
   server.on("/", handleDashboard);   // the page people open
   server.on("/data", handleData);    // fresh numbers, every 2 s
   server.on("/cancel", handleCancel);// remove one cart entry by ID
+  server.on("/pay", handlePay);      // demo checkout: clear the cart
   server.begin();
 
   beep(1, 80);                       // little "shop open!" chime
@@ -326,6 +350,22 @@ void loop() {
   for (int i = 0; i < NUM_ITEMS; i++) {
     if (uidLength == shopItems[i].uidLen &&
         memcmp(uid, shopItems[i].uid, uidLength) == 0) {
+
+      // SCAN-ONCE RULE: is this sticker already in the cart?
+      // (Compare against the scanned list. Cancelling it from the
+      //  dashboard removes it — then it can be scanned again.)
+      for (int c = 0; c < cartCount; c++) {
+        if (cartItem[c] == i) {
+          beep(2, 50);                      // "beep-beep" = refused
+          Serial.println();
+          Serial.print(F("ALREADY IN CART: "));
+          Serial.println(shopItems[i].name);
+          Serial.println(F("(cancel it on the dashboard to scan again)"));
+          Serial.println(F("--------------------------------------"));
+          showAlreadyInCart(shopItems[i].name);
+          return;
+        }
+      }
 
       if (cartCount >= MAX_CART) {
         Serial.println(F("CART FULL! Cancel something first."));
@@ -456,6 +496,44 @@ void showUnknown() {
   itemShownAt = millis();
 }
 
+// Sticker tapped twice: politely refused (scan-once rule).
+void showAlreadyInCart(const char *name) {
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println(F("Already in cart:"));
+  oled.setCursor(0, 16);
+  oled.println(name);
+  oled.setCursor(0, 40);
+  oled.println(F("Cancel on dashboard"));
+  oled.println(F("to scan again"));
+  oled.display();
+
+  showingItem = true;
+  showForMs   = SHOW_REMOVED_MS;     // quick 5-second notice
+  itemShownAt = millis();
+}
+
+// Payment complete: the thank-you screen.
+void showPaid(float amount) {
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println(F("Payment received"));
+  oled.setCursor(0, 16);
+  oled.setTextSize(2);
+  oled.print(F("RM "));
+  oled.println(amount, 2);
+  oled.setCursor(0, 44);
+  oled.setTextSize(1);
+  oled.println(F("Thank you! :)"));
+  oled.display();
+
+  showingItem = true;
+  showForMs   = SHOW_PAID_MS;        // stays for 8 seconds
+  itemShownAt = millis();
+}
+
 /* ============================================================
  *  THE WEB DASHBOARD
  *  handleDashboard = the page itself (sent once when opened)
@@ -486,13 +564,47 @@ void handleDashboard() {
     ".x{background:#e74c3c;color:#fff;border:none;border-radius:6px;"
     "padding:4px 10px;font-size:1em;cursor:pointer}"
     ".empty{color:#aaa;padding:8px 0}"
+    ".pay{background:#1a7f37;color:#fff;border:none;border-radius:8px;"
+    "padding:10px 20px;font-size:1.05em;cursor:pointer;margin-top:10px;width:100%}"
+    ".pay2{background:#1a7f37;color:#fff;border:none;border-radius:8px;"
+    "padding:10px 16px;font-size:1em;cursor:pointer}"
+    ".back{background:#999;color:#fff;border:none;border-radius:8px;"
+    "padding:10px 16px;font-size:1em;cursor:pointer}"
     "</style></head><body>"
     "<h1 style='text-align:center;margin-bottom:0'>&#128722; Cart-E</h1>"
     "<div style='text-align:center;font-style:italic;color:#666;"
     "font-size:.9em;margin-bottom:12px'>Smart Trolley</div>"
     "<div class='card'><div class='muted'>TOTAL</div>"
     "<div class='total' id='total'>RM 0.00</div>"
-    "<div class='muted'><span id='count'>0</span> item(s) in cart</div></div>"
+    "<div class='muted'><span id='count'>0</span> item(s) in cart</div>"
+    "<button class='pay' id='payBtn' style='display:none' "
+    "onclick='startPay()'>PAY NOW</button></div>"
+
+    // --- The payment screen (hidden until PAY NOW is tapped) ---
+    // DEMO QR below. To use a REAL DuitNow QR: replace the whole
+    // <svg>...</svg> block with  <img class='payqr' src='data:image/
+    // png;base64,YOUR_BASE64_HERE' width='140'>  (a base64 image works
+    // offline — remember the demo WiFi has no internet!)
+    "<div class='card' id='payCard' style='display:none;text-align:center'>"
+    "<div class='muted'>SCAN TO PAY</div>"
+    "<div style='font-size:1.5em;font-weight:bold;margin:6px 0' id='payAmt'></div>"
+    "<svg width='140' height='140' viewBox='0 0 29 29' style='background:#fff;margin:8px auto;display:block'>"
+    "<rect x='1' y='1' width='7' height='7' fill='#000'/><rect x='2.5' y='2.5' width='4' height='4' fill='#fff'/><rect x='3.5' y='3.5' width='2' height='2' fill='#000'/>"
+    "<rect x='21' y='1' width='7' height='7' fill='#000'/><rect x='22.5' y='2.5' width='4' height='4' fill='#fff'/><rect x='23.5' y='3.5' width='2' height='2' fill='#000'/>"
+    "<rect x='1' y='21' width='7' height='7' fill='#000'/><rect x='2.5' y='22.5' width='4' height='4' fill='#fff'/><rect x='3.5' y='23.5' width='2' height='2' fill='#000'/>"
+    "<g fill='#000'><rect x='10' y='2' width='2' height='2'/><rect x='14' y='1' width='2' height='2'/><rect x='17' y='4' width='2' height='2'/>"
+    "<rect x='10' y='7' width='2' height='2'/><rect x='13' y='9' width='2' height='2'/><rect x='2' y='10' width='2' height='2'/>"
+    "<rect x='6' y='12' width='2' height='2'/><rect x='9' y='13' width='3' height='3'/><rect x='15' y='12' width='2' height='2'/>"
+    "<rect x='19' y='10' width='2' height='2'/><rect x='23' y='11' width='2' height='2'/><rect x='26' y='14' width='2' height='2'/>"
+    "<rect x='3' y='15' width='2' height='2'/><rect x='13' y='17' width='2' height='2'/><rect x='17' y='16' width='3' height='2'/>"
+    "<rect x='22' y='18' width='2' height='2'/><rect x='10' y='20' width='2' height='2'/><rect x='14' y='22' width='2' height='2'/>"
+    "<rect x='18' y='21' width='2' height='2'/><rect x='21' y='24' width='3' height='2'/><rect x='12' y='25' width='2' height='2'/>"
+    "<rect x='16' y='26' width='2' height='2'/><rect x='25' y='26' width='2' height='2'/></g></svg>"
+    "<div class='muted'>Demo QR - DuitNow style</div>"
+    "<div style='margin-top:12px'>"
+    "<button class='pay2' onclick='confirmPay()'>I have paid</button> "
+    "<button class='back' onclick='hidePay()'>Back</button></div></div>"
+
     "<div class='card'><div class='muted'>LAST SCANNED</div>"
     "<div class='item' id='item'>-</div></div>"
     "<div class='card'><div class='muted'>SCANNED ITEMS</div>"
@@ -513,10 +625,14 @@ void handleDashboard() {
     "<div class='muted' style='text-align:center'>Updates every 2 seconds"
     "<br><i style='font-size:.8em'>Cart-E</i></div>"
     "<script>"
+    "let curTotal=0;"
     "async function tick(){try{"
     "let r=await fetch('/data');let d=await r.json();"
+    "curTotal=d.total;"
     "document.getElementById('total').textContent='RM '+d.total.toFixed(2);"
     "document.getElementById('count').textContent=d.count;"
+    "document.getElementById('payBtn').style.display=d.count>0?'block':'none';"
+    "document.getElementById('payAmt').textContent='RM '+d.total.toFixed(2);"
     "document.getElementById('item').textContent="
     "d.item=='-'?'-':d.item+' \\u2014 RM '+d.price.toFixed(2);"
     "let t=document.getElementById('cart');"
@@ -529,6 +645,15 @@ void handleDashboard() {
     "async function cancelItem(id){"
     "if(!confirm('Remove this item?'))return;"
     "try{await fetch('/cancel?id='+id);}catch(e){}"
+    "tick();}"
+    "function startPay(){"
+    "if(!confirm('Pay RM '+curTotal.toFixed(2)+'?'))return;"
+    "document.getElementById('payCard').style.display='block';"
+    "document.getElementById('payCard').scrollIntoView({behavior:'smooth'});}"
+    "function hidePay(){document.getElementById('payCard').style.display='none';}"
+    "async function confirmPay(){"
+    "try{await fetch('/pay');}catch(e){}"
+    "hidePay();alert('Payment successful! Thank you for shopping with Cart-E');"
     "tick();}"
     "tick();setInterval(tick,2000);"
     "</script></body></html>");
@@ -606,4 +731,38 @@ void handleCancel() {
     }
   }
   server.send(404, "text/plain", "not found"); // already removed
+}
+
+/* ============================================================
+ *  PAY — the demo checkout (called by "I have paid")
+ *  Celebrates, thanks the shopper on the OLED, and resets the
+ *  cart to RM 0.00 ready for the next customer. All scanned
+ *  stickers become scannable again (the cart is empty now).
+ * ============================================================ */
+void handlePay() {
+  if (cartCount == 0) {
+    server.send(400, "text/plain", "cart empty");
+    return;
+  }
+
+  float paid = totalPrice;
+
+  Serial.println();
+  Serial.print(F("PAYMENT RECEIVED: RM "));
+  Serial.println(paid, 2);
+  Serial.print(F("Items paid: "));
+  Serial.println(cartCount);
+  Serial.println(F("Cart reset - ready for the next shopper!"));
+  Serial.println(F("--------------------------------------"));
+
+  // Reset the shop for the next customer
+  cartCount     = 0;
+  totalPrice    = 0.0;
+  lastItemName  = "-";
+  lastItemPrice = 0.0;
+
+  showPaid(paid);        // OLED thank-you screen (8 s)
+  happyMelody();         // the little fanfare!
+
+  server.send(200, "text/plain", "ok");
 }
