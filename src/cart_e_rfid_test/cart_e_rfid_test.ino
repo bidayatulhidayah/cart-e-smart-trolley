@@ -71,7 +71,9 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 // millis() = a stopwatch, so nothing freezes while we wait.
 unsigned long itemShownAt = 0;
 bool          showingItem = false;
-const unsigned long SHOW_ITEM_MS = 20000;   // 20 seconds
+const unsigned long SHOW_ITEM_MS    = 20000;  // scanned item: 20 s
+const unsigned long SHOW_REMOVED_MS = 5000;   // removed item: 5 s
+unsigned long showForMs = SHOW_ITEM_MS;       // how long the current screen stays
 
 /* ============================================================
  *  WIFI + DASHBOARD SETTINGS
@@ -98,7 +100,18 @@ WebServer server(80);        // the little web server, on normal port 80
 // What the dashboard shows about the last scan:
 String lastItemName  = "-";
 float  lastItemPrice = 0.0;
-int    itemsScanned  = 0;
+
+/* ============================================================
+ *  THE CART — the list of scanned items
+ *  Every scan becomes an entry with its own ID number, so the
+ *  dashboard's cancel button always removes exactly the right
+ *  one (even if the same item was scanned three times).
+ * ============================================================ */
+const int MAX_CART = 30;       // plenty for a demo shop
+int cartItem[MAX_CART];        // which shopItems[] index was scanned
+int cartId[MAX_CART];          // unique ID for each entry
+int cartCount = 0;             // how many entries in the cart now
+int nextId = 1;                // ID counter (1, 2, 3, ...)
 
 // Some ESP32 boards don't define LED_BUILTIN — use GPIO2 as fallback.
 #ifndef LED_BUILTIN
@@ -242,6 +255,7 @@ void setup() {
   }
   server.on("/", handleDashboard);   // the page people open
   server.on("/data", handleData);    // fresh numbers, every 2 s
+  server.on("/cancel", handleCancel);// remove one cart entry by ID
   server.begin();
 
   Serial.println();
@@ -258,8 +272,8 @@ void loop() {
   // Answer any phone/laptop asking for the dashboard.
   server.handleClient();
 
-  // Has the 20-second item display finished? Back to the total.
-  if (showingItem && millis() - itemShownAt >= SHOW_ITEM_MS) {
+  // Has the item/removal display finished? Back to the total.
+  if (showingItem && millis() - itemShownAt >= showForMs) {
     showingItem = false;
     showTotal();
   }
@@ -290,10 +304,19 @@ void loop() {
     if (uidLength == shopItems[i].uidLen &&
         memcmp(uid, shopItems[i].uid, uidLength) == 0) {
 
+      if (cartCount >= MAX_CART) {
+        Serial.println(F("CART FULL! Cancel something first."));
+        return;
+      }
+
       totalPrice += shopItems[i].price;
       lastItemName  = shopItems[i].name;    // remember for the dashboard
       lastItemPrice = shopItems[i].price;
-      itemsScanned++;
+
+      // Put it in the cart with its own ID number
+      cartItem[cartCount] = i;
+      cartId[cartCount]   = nextId++;
+      cartCount++;
 
       Serial.println();
       Serial.print(F("ITEM ADDED: "));
@@ -367,7 +390,27 @@ void showItem(const char *name, float price) {
   oled.display();
 
   showingItem = true;
-  itemShownAt = millis();            // start the 20 s stopwatch
+  showForMs   = SHOW_ITEM_MS;        // stays for 20 seconds
+  itemShownAt = millis();            // start the stopwatch
+}
+
+// An item cancelled from the dashboard: quick 5-second notice.
+void showRemoved(const char *name, float price) {
+  oled.clearDisplay();
+  oled.setCursor(0, 0);
+  oled.setTextSize(1);
+  oled.println(F("Item removed:"));
+  oled.setCursor(0, 16);
+  oled.println(name);
+  oled.setCursor(0, 34);
+  oled.setTextSize(2);
+  oled.print(F("-RM "));
+  oled.println(price, 2);
+  oled.display();
+
+  showingItem = true;
+  showForMs   = SHOW_REMOVED_MS;     // shorter: 5 seconds
+  itemShownAt = millis();
 }
 
 // A sticker we don't know.
@@ -381,6 +424,7 @@ void showUnknown() {
   oled.display();
 
   showingItem = true;                // also returns to total after 20 s
+  showForMs   = SHOW_ITEM_MS;
   itemShownAt = millis();
 }
 
@@ -411,13 +455,18 @@ void handleDashboard() {
     "th{color:#666;font-weight:normal;font-size:.9em}"
     "td.p,th.p{text-align:right}"
     ".muted{color:#888;font-size:.85em}"
+    ".x{background:#e74c3c;color:#fff;border:none;border-radius:6px;"
+    "padding:4px 10px;font-size:1em;cursor:pointer}"
+    ".empty{color:#aaa;padding:8px 0}"
     "</style></head><body>"
     "<h1>&#128722; Cart-E Smart Trolley</h1>"
     "<div class='card'><div class='muted'>TOTAL</div>"
     "<div class='total' id='total'>RM 0.00</div>"
-    "<div class='muted'><span id='count'>0</span> item(s) scanned</div></div>"
+    "<div class='muted'><span id='count'>0</span> item(s) in cart</div></div>"
     "<div class='card'><div class='muted'>LAST SCANNED</div>"
     "<div class='item' id='item'>-</div></div>"
+    "<div class='card'><div class='muted'>SCANNED ITEMS</div>"
+    "<table id='cart'><tr class='empty'><td>Nothing scanned yet</td></tr></table></div>"
     "<div class='card'><div class='muted'>PRICE LIST</div>"
     "<table><tr><th>Item</th><th class='p'>Price (RM)</th></tr>");
 
@@ -439,7 +488,17 @@ void handleDashboard() {
     "document.getElementById('count').textContent=d.count;"
     "document.getElementById('item').textContent="
     "d.item=='-'?'-':d.item+' \\u2014 RM '+d.price.toFixed(2);"
+    "let t=document.getElementById('cart');"
+    "if(d.cart.length==0){t.innerHTML=\"<tr class='empty'><td>Nothing scanned yet</td></tr>\";}"
+    "else{let h='';for(let e of d.cart){"
+    "h+=`<tr><td>${e.n}</td><td class='p'>${e.p.toFixed(2)}</td>"
+    "<td class='p'><button class='x' onclick='cancelItem(${e.id})'>&#10005;</button></td></tr>`;}"
+    "t.innerHTML=h;}"
     "}catch(e){}}"
+    "async function cancelItem(id){"
+    "if(!confirm('Remove this item?'))return;"
+    "try{await fetch('/cancel?id='+id);}catch(e){}"
+    "tick();}"
     "tick();setInterval(tick,2000);"
     "</script></body></html>");
 
@@ -447,9 +506,11 @@ void handleDashboard() {
 }
 
 void handleData() {
-  // A tiny JSON message: {"item":"Susu","price":3.50,"total":7.00,"count":2}
+  // JSON with the cart list, e.g.:
+  // {"item":"Susu","price":3.50,"total":7.00,"count":2,
+  //  "cart":[{"id":1,"n":"Susu","p":3.50},{"id":2,"n":"Egg","p":13.50}]}
   String json;
-  json.reserve(120);
+  json.reserve(200 + cartCount * 45);
   json += F("{\"item\":\"");
   json += lastItemName;
   json += F("\",\"price\":");
@@ -457,7 +518,59 @@ void handleData() {
   json += F(",\"total\":");
   json += String(totalPrice, 2);
   json += F(",\"count\":");
-  json += itemsScanned;
-  json += F("}");
+  json += cartCount;
+  json += F(",\"cart\":[");
+  for (int i = 0; i < cartCount; i++) {
+    if (i > 0) json += ',';
+    json += F("{\"id\":");
+    json += cartId[i];
+    json += F(",\"n\":\"");
+    json += shopItems[cartItem[i]].name;
+    json += F("\",\"p\":");
+    json += String(shopItems[cartItem[i]].price, 2);
+    json += F("}");
+  }
+  json += F("]}");
   server.send(200, "application/json", json);
+}
+
+/* ============================================================
+ *  CANCEL — remove one cart entry by its ID
+ *  Called by the dashboard's red X button: /cancel?id=7
+ *  Using the unique ID (not the row position) means the button
+ *  always removes exactly the entry the user clicked, even if
+ *  more items were scanned since the page loaded.
+ * ============================================================ */
+void handleCancel() {
+  int id = server.arg("id").toInt();
+
+  for (int i = 0; i < cartCount; i++) {
+    if (cartId[i] == id) {
+      int idx = cartItem[i];
+      totalPrice -= shopItems[idx].price;      // give the money back
+      if (totalPrice < 0.005) totalPrice = 0;  // tidy tiny rounding dust
+
+      Serial.println();
+      Serial.print(F("CANCELLED: "));
+      Serial.print(shopItems[idx].name);
+      Serial.print(F("  -RM "));
+      Serial.println(shopItems[idx].price, 2);
+      Serial.print(F("New total: RM "));
+      Serial.println(totalPrice, 2);
+      Serial.println(F("--------------------------------------"));
+
+      showRemoved(shopItems[idx].name, shopItems[idx].price);
+
+      // Close the gap: slide everything after it one step left
+      for (int j = i; j < cartCount - 1; j++) {
+        cartItem[j] = cartItem[j + 1];
+        cartId[j]   = cartId[j + 1];
+      }
+      cartCount--;
+
+      server.send(200, "text/plain", "ok");
+      return;
+    }
+  }
+  server.send(404, "text/plain", "not found"); // already removed
 }
