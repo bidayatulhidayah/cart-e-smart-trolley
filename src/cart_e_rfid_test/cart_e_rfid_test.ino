@@ -32,9 +32,20 @@
  *  into the Maker Port / Grove Port 2, or parallel the wires.
  *  PN532 answers at address 0x24, OLED at 0x3C — no clash.
  *
+ *  NEW: MINI WEB DASHBOARD!
+ *  The ESP32 broadcasts its own WiFi network. Connect a phone or
+ *  laptop to it and open the fixed address in a browser:
+ *      WiFi name : CartE-Dashboard   password: carte1234
+ *      Address   : http://192.168.4.1
+ *  The page shows the full price list, the last scanned item and
+ *  the running total — it refreshes itself every 2 seconds.
+ *  (Prefer joining your own router with a static IP instead?
+ *   Set USE_ACCESS_POINT to false and fill in the WiFi section.)
+ *
  *  Open Serial Monitor at 115200.
  *  LIBRARIES NEEDED: Adafruit PN532, Adafruit SSD1306,
  *                    Adafruit GFX Library
+ *  (WiFi + WebServer are built into the ESP32 core — free!)
  * ============================================================
  */
 
@@ -42,6 +53,8 @@
 #include <Adafruit_PN532.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <WiFi.h>          // the ESP32's built-in WiFi
+#include <WebServer.h>     // a tiny web server, also built in
 
 #define SDA_PIN     21
 #define SCL_PIN     22
@@ -59,6 +72,33 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 unsigned long itemShownAt = 0;
 bool          showingItem = false;
 const unsigned long SHOW_ITEM_MS = 20000;   // 20 seconds
+
+/* ============================================================
+ *  WIFI + DASHBOARD SETTINGS
+ * ============================================================ */
+
+// true  = the trolley makes ITS OWN WiFi network (best for demos —
+//         works anywhere, address is always http://192.168.4.1)
+// false = join your router below with a static IP of your choice
+#define USE_ACCESS_POINT true
+
+// Access Point mode (trolley's own network):
+const char *AP_NAME     = "CartE-Dashboard";
+const char *AP_PASSWORD = "carte1234";        // min 8 characters
+
+// Router mode (only used if USE_ACCESS_POINT is false):
+const char *WIFI_NAME     = "YourWifiName";
+const char *WIFI_PASSWORD = "YourWifiPassword";
+IPAddress staticIP(192, 168, 1, 50);   // pick a free IP on your network
+IPAddress gateway (192, 168, 1, 1);    // usually your router's address
+IPAddress subnet  (255, 255, 255, 0);
+
+WebServer server(80);        // the little web server, on normal port 80
+
+// What the dashboard shows about the last scan:
+String lastItemName  = "-";
+float  lastItemPrice = 0.0;
+int    itemsScanned  = 0;
 
 // Some ESP32 boards don't define LED_BUILTIN — use GPIO2 as fallback.
 #ifndef LED_BUILTIN
@@ -176,6 +216,34 @@ void setup() {
   oled.setTextColor(SSD1306_WHITE);
   showTotal();                       // screen starts at RM 0.00
 
+  Serial.println(F("=== STEP 7: Starting WiFi + dashboard ==="));
+  if (USE_ACCESS_POINT) {
+    WiFi.softAP(AP_NAME, AP_PASSWORD);
+    Serial.print(F("WiFi network created: "));
+    Serial.println(AP_NAME);
+    Serial.print(F("Dashboard address: http://"));
+    Serial.println(WiFi.softAPIP());     // always 192.168.4.1
+  } else {
+    WiFi.config(staticIP, gateway, subnet);
+    WiFi.begin(WIFI_NAME, WIFI_PASSWORD);
+    Serial.print(F("Joining WiFi"));
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 30) {
+      delay(500); Serial.print('.'); tries++;
+    }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print(F("Dashboard address: http://"));
+      Serial.println(WiFi.localIP());
+    } else {
+      Serial.println(F("WARNING: WiFi not found - dashboard offline,"));
+      Serial.println(F("but RFID + OLED keep working normally."));
+    }
+  }
+  server.on("/", handleDashboard);   // the page people open
+  server.on("/data", handleData);    // fresh numbers, every 2 s
+  server.begin();
+
   Serial.println();
   Serial.print(F("SHOP OPEN! "));
   Serial.print(NUM_ITEMS);
@@ -187,6 +255,9 @@ void setup() {
  *  LOOP — tap items, watch the shop work
  * ============================================================ */
 void loop() {
+  // Answer any phone/laptop asking for the dashboard.
+  server.handleClient();
+
   // Has the 20-second item display finished? Back to the total.
   if (showingItem && millis() - itemShownAt >= SHOW_ITEM_MS) {
     showingItem = false;
@@ -196,8 +267,12 @@ void loop() {
   uint8_t uid[7];
   uint8_t uidLength;
 
+  // Timeout is 100 ms now (was 1000): with a 1-second wait the web
+  // dashboard would feel laggy, since the ESP32 can't answer the
+  // browser while it's waiting for a card. 100 ms taps still work
+  // perfectly — the loop just asks 10x more often.
   boolean success =
-    nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength, 1000);
+    nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength, 100);
   if (!success) return;
 
   // Same sticker still sitting on the reader? Skip the repeat
@@ -216,6 +291,9 @@ void loop() {
         memcmp(uid, shopItems[i].uid, uidLength) == 0) {
 
       totalPrice += shopItems[i].price;
+      lastItemName  = shopItems[i].name;    // remember for the dashboard
+      lastItemPrice = shopItems[i].price;
+      itemsScanned++;
 
       Serial.println();
       Serial.print(F("ITEM ADDED: "));
@@ -304,4 +382,82 @@ void showUnknown() {
 
   showingItem = true;                // also returns to total after 20 s
   itemShownAt = millis();
+}
+
+/* ============================================================
+ *  THE WEB DASHBOARD
+ *  handleDashboard = the page itself (sent once when opened)
+ *  handleData      = fresh numbers as JSON; the page asks for
+ *                    them every 2 seconds and updates itself
+ * ============================================================ */
+
+void handleDashboard() {
+  // Build the page. The price list table is filled from shopItems,
+  // so adding items to the code automatically updates the dashboard.
+  String html;
+  html.reserve(3500);
+  html += F(
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Cart-E Dashboard</title><style>"
+    "body{font-family:Arial,sans-serif;background:#f4f1ec;margin:0;padding:16px;color:#222}"
+    "h1{font-size:1.3em;margin:0 0 12px}"
+    ".card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;"
+    "box-shadow:0 1px 4px rgba(0,0,0,.12)}"
+    ".total{font-size:2.2em;font-weight:bold;color:#1a7f37}"
+    ".item{font-size:1.2em}"
+    "table{width:100%;border-collapse:collapse}"
+    "td,th{text-align:left;padding:6px 4px;border-bottom:1px solid #eee}"
+    "th{color:#666;font-weight:normal;font-size:.9em}"
+    "td.p,th.p{text-align:right}"
+    ".muted{color:#888;font-size:.85em}"
+    "</style></head><body>"
+    "<h1>&#128722; Cart-E Smart Trolley</h1>"
+    "<div class='card'><div class='muted'>TOTAL</div>"
+    "<div class='total' id='total'>RM 0.00</div>"
+    "<div class='muted'><span id='count'>0</span> item(s) scanned</div></div>"
+    "<div class='card'><div class='muted'>LAST SCANNED</div>"
+    "<div class='item' id='item'>-</div></div>"
+    "<div class='card'><div class='muted'>PRICE LIST</div>"
+    "<table><tr><th>Item</th><th class='p'>Price (RM)</th></tr>");
+
+  for (int i = 0; i < NUM_ITEMS; i++) {
+    html += F("<tr><td>");
+    html += shopItems[i].name;
+    html += F("</td><td class='p'>");
+    html += String(shopItems[i].price, 2);
+    html += F("</td></tr>");
+  }
+
+  html += F(
+    "</table></div>"
+    "<div class='muted'>Updates every 2 seconds &middot; Cart-E</div>"
+    "<script>"
+    "async function tick(){try{"
+    "let r=await fetch('/data');let d=await r.json();"
+    "document.getElementById('total').textContent='RM '+d.total.toFixed(2);"
+    "document.getElementById('count').textContent=d.count;"
+    "document.getElementById('item').textContent="
+    "d.item=='-'?'-':d.item+' \\u2014 RM '+d.price.toFixed(2);"
+    "}catch(e){}}"
+    "tick();setInterval(tick,2000);"
+    "</script></body></html>");
+
+  server.send(200, "text/html", html);
+}
+
+void handleData() {
+  // A tiny JSON message: {"item":"Susu","price":3.50,"total":7.00,"count":2}
+  String json;
+  json.reserve(120);
+  json += F("{\"item\":\"");
+  json += lastItemName;
+  json += F("\",\"price\":");
+  json += String(lastItemPrice, 2);
+  json += F(",\"total\":");
+  json += String(totalPrice, 2);
+  json += F(",\"count\":");
+  json += itemsScanned;
+  json += F("}");
+  server.send(200, "application/json", json);
 }
