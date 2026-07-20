@@ -1,0 +1,15 @@
+
+1.F2 64 3A C7 (Susu)
+2.D2 9B 3A C7 (Potato Chip)
+3.72 E1 3A C7 (Sandwich Cookies)
+4.C2 9C 2C C7 (Morning Coffee)
+5.12 21 3A C7 (Orange Juice)
+6.6B A5 3B CE (Oatmeal)
+7.6B 9D BD CE (Snacks)
+8.6B A0 E9 CE (Veggies)
+9.6B 91 FD CE (Fruits)
+10.6B 98 D7 CE (egg)
+
+
+
+
