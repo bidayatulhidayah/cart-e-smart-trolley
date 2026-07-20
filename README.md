@@ -3,10 +3,6 @@
 *A shopping trolley that follows you like a duckling, scans your shopping
 as you go, and lets you pay right at the trolley — hands-free shopping
 with no queues, for everyone.*
-
-Built by primary school (Year 6) students for robotics competition, coached
-by their teachers. Programmed in Arduino C++ on an ESP32.
-
 ---
 
 ## ✨ Features
@@ -111,10 +107,6 @@ duckling**, and can be fooled if a stranger walks in between. We designed
 around it honestly: the start ritual, a WAIT case instead of guessing,
 and bodyguards that protect everything regardless of what it is.
 
-**v2 roadmap:** carried beacon · thermal sensor (AMG8833) · AI camera
+**V2 roadmap:** carried beacon · thermal sensor (AMG8833) · AI camera
 (HuskyLens) · PWM speed control · real payment integration.
 
-## 🙏 Team
-
-Students of Year 6 (the engineers!), coached by Husna, Faezah, Izzah
-and the team. Board and inspiration: Cytron Robo ESP32 🇲🇾
