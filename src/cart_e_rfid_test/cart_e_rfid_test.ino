@@ -21,24 +21,30 @@
  *
  *  WHAT THIS DOES:
  *  All 10 shop items are already registered below. Tap an item:
- *   - Known sticker  -> "boop-less" bench version: the OLED shows
- *     the item name + price for 20 seconds, then goes back to the
+ *   - Known sticker  -> "boop!" on the buzzer, the OLED shows the
+ *     item name + price for 20 seconds, then goes back to the
  *     running TOTAL — exactly how the real trolley will behave.
- *   - Unknown sticker-> OLED says "Unknown item", and the Serial
- *     Monitor prints a ready-to-paste line to register it.
+ *   - Unknown sticker-> "beep-beep", OLED says "Unknown item", and
+ *     the Serial Monitor prints a ready-to-paste line to register it.
+ *
+ *  SOUNDS (built-in buzzer on D23 — MUTE switch must be ON!):
+ *    1 solid beep  = item added
+ *    2 quick beeps = unknown sticker
+ *    tiny blip     = item cancelled from the dashboard
  *
  *  OLED: 0.96" 128x64 blue I2C display (SSD1306). It shares the
  *  SAME two I2C wires as the PN532 (SDA=D21, SCL=D22) — plug it
  *  into the Maker Port / Grove Port 2, or parallel the wires.
  *  PN532 answers at address 0x24, OLED at 0x3C — no clash.
  *
- *  NEW: MINI WEB DASHBOARD!
+ *  MINI WEB DASHBOARD:
  *  The ESP32 broadcasts its own WiFi network. Connect a phone or
  *  laptop to it and open the fixed address in a browser:
  *      WiFi name : CartE-Dashboard   password: carte1234
  *      Address   : http://192.168.4.1
- *  The page shows the full price list, the last scanned item and
- *  the running total — it refreshes itself every 2 seconds.
+ *  The page shows the full price list, the scanned items with a
+ *  cancel button, the last scanned item and the running total —
+ *  it refreshes itself every 2 seconds.
  *  (Prefer joining your own router with a static IP instead?
  *   Set USE_ACCESS_POINT to false and fill in the WiFi section.)
  *
@@ -60,6 +66,8 @@
 #define SCL_PIN     22
 #define PN532_IRQ   33
 #define PN532_RESET 25
+#define BUZZER      23     // built-in buzzer on the Robo ESP32
+                           // (its MUTE switch must be ON!)
 
 // Real IRQ + RESET pins — the way that actually works on our module.
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
@@ -159,12 +167,25 @@ void blinkForever() {
   }
 }
 
+// Beep n times using tone() — the piezo needs a musical note.
+// 2000 Hz = a clear "robot beep" pitch.
+void beep(int n, int ms) {
+  for (int i = 0; i < n; i++) {
+    tone(BUZZER, 2000);
+    delay(ms);
+    noTone(BUZZER);
+    if (i < n - 1) delay(ms);
+  }
+}
+
 /* ============================================================
  *  SETUP — the proven step-by-step startup with diagnostics
  * ============================================================ */
 void setup() {
   Serial.begin(115200);
   delay(1500); // let Serial Monitor attach after reset
+
+  pinMode(BUZZER, OUTPUT);  // buzzer ready before anything beeps
 
   Serial.println();
   Serial.println(F("=== STEP 0: Boot OK, Serial is alive ==="));
@@ -258,6 +279,8 @@ void setup() {
   server.on("/cancel", handleCancel);// remove one cart entry by ID
   server.begin();
 
+  beep(1, 80);                       // little "shop open!" chime
+
   Serial.println();
   Serial.print(F("SHOP OPEN! "));
   Serial.print(NUM_ITEMS);
@@ -306,6 +329,7 @@ void loop() {
 
       if (cartCount >= MAX_CART) {
         Serial.println(F("CART FULL! Cancel something first."));
+        beep(3, 60);                        // grumpy triple beep
         return;
       }
 
@@ -317,6 +341,8 @@ void loop() {
       cartItem[cartCount] = i;
       cartId[cartCount]   = nextId++;
       cartCount++;
+
+      beep(1, 100);                         // "boop!" = item added
 
       Serial.println();
       Serial.print(F("ITEM ADDED: "));
@@ -333,6 +359,8 @@ void loop() {
   }
 
   // --- Not in the database: show UID + a ready-to-paste line ---
+  beep(2, 50);                              // "beep-beep" = not recognised
+
   Serial.println();
   Serial.print(F("UNKNOWN sticker! UID: "));
   for (uint8_t i = 0; i < uidLength; i++) {
@@ -552,6 +580,8 @@ void handleCancel() {
       int idx = cartItem[i];
       totalPrice -= shopItems[idx].price;      // give the money back
       if (totalPrice < 0.005) totalPrice = 0;  // tidy tiny rounding dust
+
+      beep(1, 40);                             // tiny blip = item removed
 
       Serial.println();
       Serial.print(F("CANCELLED: "));
