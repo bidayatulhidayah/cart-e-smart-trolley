@@ -459,7 +459,9 @@ void handleDashboard() {
     "padding:4px 10px;font-size:1em;cursor:pointer}"
     ".empty{color:#aaa;padding:8px 0}"
     "</style></head><body>"
-    "<h1>&#128722; Cart-E Smart Trolley</h1>"
+    "<h1 style='text-align:center;margin-bottom:0'>&#128722; Cart-E</h1>"
+    "<div style='text-align:center;font-style:italic;color:#666;"
+    "font-size:.9em;margin-bottom:12px'>Smart Trolley</div>"
     "<div class='card'><div class='muted'>TOTAL</div>"
     "<div class='total' id='total'>RM 0.00</div>"
     "<div class='muted'><span id='count'>0</span> item(s) in cart</div></div>"
@@ -480,7 +482,8 @@ void handleDashboard() {
 
   html += F(
     "</table></div>"
-    "<div class='muted'>Updates every 2 seconds &middot; Cart-E</div>"
+    "<div class='muted' style='text-align:center'>Updates every 2 seconds"
+    "<br><i style='font-size:.8em'>Cart-E</i></div>"
     "<script>"
     "async function tick(){try{"
     "let r=await fetch('/data');let d=await r.json();"
