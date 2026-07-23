@@ -80,11 +80,11 @@ const int SW_POWER = 35;    // latching button (LOW = ON)
  *    150 ......   : LOST     (stop + buzzer — person gone)
  * ============================================================ */
 const int FOLLOW_DIST   = 30;   // middle of the STOP sweet spot
-const int DEAD_ZONE     = 3;    // sweet spot = 30 +/- 3 = 27 to 33
-const int LOST_DIST     = 150;  // beyond this = person is gone
+const int DEAD_ZONE     = 5;    // sweet spot = 30 +/- 3 = 27 to 33
+const int LOST_DIST     = 100;  // beyond this = person is gone
 const int PERSON_RANGE  = 60;   // corner eye sees the person within this
 const int GUARD_DIST    = 10;   // bodyguards: closer = DANGER
-const int SQUEEZE_DIST  = 5;    // sides really scraping something
+const int SQUEEZE_DIST  = 8;    // sides really scraping something
 
 enum Move { STOP, FORWARD, REVERSE, TURN_LEFT, TURN_RIGHT, LOST, WAIT };
 
@@ -281,19 +281,23 @@ Move safetyCheck(Move wanted, long dBackLeft, long dBackRight, long dBack) {
  *   turn, both wheels opposite ways, rotates on the spot.)
  * ============================================================ */
 void doMove(Move m) {
+  static bool lostBeeped = false;
   switch (m) {
     case FORWARD:
-      showColor(0, 255, 0);  goForward();                break;
+      showColor(0, 255, 0);  goForward();  lostBeeped = false; break;
     case REVERSE:
-      showColor(0, 255, 0);  goBackward();               break;
+      showColor(0, 255, 0);  goBackward(); lostBeeped = false; break;
     case TURN_LEFT:
-      showColor(0, 255, 0);  motorM1(-1); motorM2(+1);   break;
+      showColor(0, 255, 0);  motorM1(-1); motorM2(+1); lostBeeped = false; break;
     case TURN_RIGHT:
-      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
+      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);  lostBeeped = false; break;
     case LOST:
       stopMotors();
       showColor(255, 150, 0);          // yellow: "wait for me!"
-      beep(1, 300);
+      if (!lostBeeped) {
+        beep(1, 300);
+        lostBeeped = true;
+      }
       break;
     case WAIT:
       stopMotors();
@@ -303,6 +307,7 @@ void doMove(Move m) {
     default:
       stopMotors();
       showColor(0, 255, 0);            // green: happy, resting
+      lostBeeped = false;
       break;
   }
 }

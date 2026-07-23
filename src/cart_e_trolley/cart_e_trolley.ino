@@ -92,6 +92,8 @@ const int BUZZER     = 23;  // built-in + external in parallel (NOT 24!)
 const int NEOPIXELS  = 15;  // onboard 2 + external stick in parallel
 const int NUM_PIXELS = 8;
 
+
+
 const int SW_POWER = 35;    // latching button (LOW = ON)
                             // onboard button "1" shares this pin
 
@@ -110,11 +112,11 @@ const int SW_POWER = 35;    // latching button (LOW = ON)
  *     33 .....150 : FORWARD    150 ......   : LOST
  * ============================================================ */
 const int FOLLOW_DIST   = 30;   // middle of the STOP sweet spot
-const int DEAD_ZONE     = 3;    // sweet spot = 27 to 33
-const int LOST_DIST     = 150;  // beyond this = person is gone
+const int DEAD_ZONE     = 5;    // sweet spot = 27 to 33
+const int LOST_DIST     = 100;  // beyond this = person is gone
 const int PERSON_RANGE  = 60;   // corner eye sees the person within this
 const int GUARD_DIST    = 10;   // bodyguards: closer = DANGER
-const int SQUEEZE_DIST  = 5;    // sides really scraping something
+const int SQUEEZE_DIST  = 8;    // sides really scraping something
 
 enum Move { STOP, FORWARD, REVERSE, TURN_LEFT, TURN_RIGHT, LOST, WAIT };
 
@@ -153,16 +155,16 @@ struct Item {
 };
 
 Item shopItems[] = {
-  { {0xF2, 0x64, 0x3A, 0xC7}, 4, "Susu",             3.50 },
-  { {0xD2, 0x9B, 0x3A, 0xC7}, 4, "Potato Chip",      4.20 },
-  { {0x72, 0xE1, 0x3A, 0xC7}, 4, "Sandwich Cookies", 5.00 },
-  { {0xC2, 0x9C, 0x2C, 0xC7}, 4, "Morning Coffee",   8.90 },
-  { {0x12, 0x21, 0x3A, 0xC7}, 4, "Orange Juice",     6.50 },
-  { {0x6B, 0xA5, 0x3B, 0xCE}, 4, "Oatmeal",         12.90 },
-  { {0x6B, 0x9D, 0xBD, 0xCE}, 4, "Snacks",           3.00 },
-  { {0x6B, 0xA0, 0xE9, 0xCE}, 4, "Veggies",          7.50 },
-  { {0x6B, 0x91, 0xFD, 0xCE}, 4, "Fruits",           9.90 },
-  { {0x6B, 0x98, 0xD7, 0xCE}, 4, "Egg",             13.50 },
+  { {0xF2, 0x64, 0x3A, 0xC7}, 4, "Natural Milk",      5.05 },
+  { {0xD2, 0x9B, 0x3A, 0xC7}, 4, "Potato Chips",      1.99 },
+  { {0x72, 0xE1, 0x3A, 0xC7}, 4, "Sandwich Cookies",  4.50 },
+  { {0xC2, 0x9C, 0x2C, 0xC7}, 4, "Morning Coffee",    6.70 },
+  { {0x12, 0x21, 0x3A, 0xC7}, 4, "Orange Juice",      6.50 },
+  { {0x6B, 0xA5, 0x3B, 0xCE}, 4, "Oatmeal",          12.90 },
+  { {0x6B, 0x9D, 0xBD, 0xCE}, 4, "Soda Box",          8.90 },
+  { {0x6B, 0xA0, 0xE9, 0xCE}, 4, "Veggies",          24.00 },
+  { {0x6B, 0x91, 0xFD, 0xCE}, 4, "Fruits",           20.80 },
+  { {0x6B, 0x98, 0xD7, 0xCE}, 4, "Egg",              13.50 },
 };
 const int NUM_ITEMS = sizeof(shopItems) / sizeof(shopItems[0]);
 
@@ -445,9 +447,18 @@ Move chooseMove(long dFront, long dLeft, long dRight) {
   }
 
   // Front eye sees nobody. Where did they go?
-  if (personLeft && personRight) return WAIT;   // CASE 11: confused
-  if (personLeft)  return TURN_LEFT;            // CASE 5: chase left
-  if (personRight) return TURN_RIGHT;           // CASE 6: chase right
+  if (personLeft && personRight) {
+    return WAIT;   // CASE 11: confused
+  }
+  
+  if (personLeft)  {
+    return TURN_LEFT; 
+  }           // CASE 5: chase left
+  
+  if (personRight) {
+    return TURN_RIGHT; 
+  }            // CASE 6: chase right
+  
   return LOST;                                  // CASE 4: abandoned
 }
 
@@ -481,20 +492,23 @@ Move safetyCheck(Move wanted, long dBackLeft, long dBackRight, long dBack) {
  * ============================================================ */
 void doMove(Move m) {
   currentMove = MOVE_NAME[m];        // live status for the dashboard
-
+  static bool lostBeeped = false;
   switch (m) {
     case FORWARD:
-      showColor(0, 255, 0);  goForward();                break;
+      showColor(0, 255, 0);  goForward();  lostBeeped = false; break;
     case REVERSE:
-      showColor(0, 255, 0);  goBackward();               break;
+      showColor(0, 255, 0);  goBackward(); lostBeeped = false; break;
     case TURN_LEFT:
-      showColor(0, 255, 0);  motorM1(-1); motorM2(+1);   break;
+      showColor(0, 255, 0);  motorM1(-1); motorM2(+1); lostBeeped = false; break;
     case TURN_RIGHT:
-      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);   break;
+      showColor(0, 255, 0);  motorM1(+1); motorM2(-1);  lostBeeped = false; break;
     case LOST:
       stopMotors();
       showColor(255, 150, 0);          // yellow: "wait for me!"
-      beep(1, 300);
+      if (!lostBeeped) {
+        beep(1, 300);
+        lostBeeped = true;
+      }
       break;
     case WAIT:
       stopMotors();
